@@ -1,6 +1,7 @@
 # PanelManager
 
-PanelManager 是一个基于 .NET MAUI + BlazorWebView 的桌面控制面板项目，面向触控屏/设备管理场景，集成了系统控制、串口通信、WiFi/蓝牙管理、页面工具集和 AI 助手能力（OpenCode sidecar）。
+PanelManager 是一个基于 .NET MAUI + BlazorWebView 的桌面副屏控制面板项目，面向触控屏/设备管理场景，集成了系统控制、串口通信、WiFi/蓝牙管理、页面工具集和 AI 助手能力（OpenCode sidecar）。
+当前项目主要是上位机部分实现，硬件部分请移步至 [立创开源广场](https://oshwhub.com/5473675a/project_rnkdtbtx)
 
 ## 主要能力
 
