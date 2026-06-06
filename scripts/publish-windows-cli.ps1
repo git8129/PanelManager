@@ -62,7 +62,7 @@ $panelManagerProject = Join-Path $root "PanelManager\PanelManager.csproj"
 if ($LASTEXITCODE -ne 0) {
   throw "FloatingWindow restore failed with exit code $LASTEXITCODE"
 }
-& $dotnetExe restore $panelManagerProject -r $Runtime --configfile $nugetConfig --packages $nugetPackages
+& $dotnetExe restore $panelManagerProject -r $Runtime --configfile $nugetConfig --packages $nugetPackages -p:PublishReadyToRun=true
 if ($LASTEXITCODE -ne 0) {
   throw "PanelManager restore failed with exit code $LASTEXITCODE"
 }
