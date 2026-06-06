@@ -50,15 +50,9 @@ $env:PATH = "$dotnetDir;$env:PATH"
 $env:DOTNET_CLI_HOME = $dotnetHome
 $env:NUGET_PACKAGES = $nugetPackages
 
-$workloads = (& $dotnetExe workload list | Out-String)
+& $dotnetExe workload install maui-windows
 if ($LASTEXITCODE -ne 0) {
-  throw "dotnet workload list failed with exit code $LASTEXITCODE"
-}
-if ($workloads -notmatch "maui-windows") {
-  & $dotnetExe workload install maui-windows
-  if ($LASTEXITCODE -ne 0) {
-    throw "dotnet workload install maui-windows failed with exit code $LASTEXITCODE"
-  }
+  throw "dotnet workload install maui-windows failed with exit code $LASTEXITCODE"
 }
 
 $floatingWindowProject = Join-Path $root "FloatingWindow\FloatingWindow.csproj"

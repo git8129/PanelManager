@@ -30,10 +30,10 @@ jobs:
 
     steps:
       - name: Checkout source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Cache build dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             .sandbox/dotnet
@@ -63,7 +63,7 @@ jobs:
           Get-Item -LiteralPath $setup | Format-List Name, Length, LastWriteTime
 
       - name: Upload installer
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: PanelManagerSetup-${{ env.RUNTIME_IDENTIFIER }}
           path: .sandbox/artifacts/installer/output/PanelManagerSetup.exe
@@ -71,7 +71,7 @@ jobs:
           retention-days: 14
 
       - name: Upload source archive
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: PanelManager-source
           path: .sandbox/artifacts/publish/windows-${{ env.RUNTIME_IDENTIFIER }}/PanelManager-source-*.zip
