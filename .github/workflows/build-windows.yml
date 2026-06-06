@@ -1,0 +1,79 @@
+name: Build Windows Installer
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  SDK_VERSION: 9.0.311
+  RUNTIME_IDENTIFIER: win-x64
+
+jobs:
+  build:
+    name: Package win-x64 installer
+    runs-on: windows-2022
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Cache build dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            .sandbox/dotnet
+            .sandbox/nuget/packages
+            .sandbox/tools/7zip
+          key: panelmanager-${{ runner.os }}-sdk-${{ env.SDK_VERSION }}-${{ hashFiles('**/*.csproj') }}
+          restore-keys: |
+            panelmanager-${{ runner.os }}-sdk-${{ env.SDK_VERSION }}-
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          .\scripts\package-windows-installer.ps1 `
+            -Configuration Release `
+            -SdkVersion $env:SDK_VERSION `
+            -Runtime $env:RUNTIME_IDENTIFIER `
+            -OutputDir .\.sandbox\artifacts\installer\output `
+            -WatermarkText ""
+
+      - name: Verify installer
+        shell: pwsh
+        run: |
+          $setup = ".\.sandbox\artifacts\installer\output\PanelManagerSetup.exe"
+          if (-not (Test-Path -LiteralPath $setup)) {
+            throw "Installer was not generated: $setup"
+          }
+          Get-Item -LiteralPath $setup | Format-List Name, Length, LastWriteTime
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: PanelManagerSetup-${{ env.RUNTIME_IDENTIFIER }}
+          path: .sandbox/artifacts/installer/output/PanelManagerSetup.exe
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload source archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: PanelManager-source
+          path: .sandbox/artifacts/publish/windows-${{ env.RUNTIME_IDENTIFIER }}/PanelManager-source-*.zip
+          if-no-files-found: error
+          retention-days: 14

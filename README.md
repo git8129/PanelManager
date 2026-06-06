@@ -59,6 +59,18 @@ powershell -ExecutionPolicy Bypass -File .\scripts\publish-windows-cli.ps1
 - 主程序与依赖文件
 - `PanelManager-source-*.zip` 源码包
 
+## GitHub Actions
+
+仓库通过 `.github/workflows/build-windows.yml` 调用
+`scripts/package-windows-installer.ps1` 自动构建 Windows x64 安装包：
+
+- 推送到 `main` 时自动运行
+- 向 `main` 提交 Pull Request 时自动运行
+- 支持在 GitHub Actions 页面手动运行
+- 安装程序保存为 `PanelManagerSetup-win-x64` artifact
+- 源码包保存为 `PanelManager-source` artifact
+- Actions artifact 默认保留 14 天
+
 ## 替换旧版本建议
 
 - 不要直接覆盖当前运行目录
@@ -83,3 +95,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\publish-windows-cli.ps1
 - 功能入口通常在 `PanelManager/wwwroot/script.js`。
 - 宿主命令与设备侧桥接在 `PanelManager/Services/HostCommandHandler.cs`。
 - OpenCode 生命周期与事件订阅在 `PanelManager/Services/OpenCodeSidecarService.cs`。
+
+## 许可证
+
+本项目使用 [MIT License](LICENSE)。
