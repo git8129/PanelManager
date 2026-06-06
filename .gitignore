@@ -1,0 +1,25 @@
+# Build artifacts
+**/bin/
+**/obj/
+
+# Workspace sandbox
+**/.sandbox/
+
+# IDE
+**/.vs/
+**/.vscode/
+*.user
+*.suo
+
+# MSIX signing keys/certs
+*.pfx
+*.p12
+*.cer
+*.crt
+*.key
+*.der
+*.ppk
+
+# OS
+Thumbs.db
+Desktop.ini

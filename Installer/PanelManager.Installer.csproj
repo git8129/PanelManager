@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PublishAot>true</PublishAot>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <AssemblyName>PanelManagerSetup</AssemblyName>
+    <RootNamespace>PanelManager.Installer</RootNamespace>
+    <ApplicationIcon>..\PanelManager\Resources\AppIcon\appicon.ico</ApplicationIcon>
+    <IlcOptimizationPreference>Speed</IlcOptimizationPreference>
+    <IlcFoldIdenticalMethodBodies>true</IlcFoldIdenticalMethodBodies>
+    <TrimmerDefaultAction>link</TrimmerDefaultAction>
+    <TrimmerSingleWarn>false</TrimmerSingleWarn>
+    <SuppressTrimAnalysisWarnings>true</SuppressTrimAnalysisWarnings>
+    <IlcGenerateMstatFile>false</IlcGenerateMstatFile>
+    <IlcGenerateDgmlFile>false</IlcGenerateDgmlFile>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <RuntimeHostConfigurationOption Include="System.Runtime.InteropServices.EnableConsumingManagedCodeFromNativeHosting" Value="true" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(PayloadZip)' != '' And Exists('$(PayloadZip)')">
+    <EmbeddedResource Include="$(PayloadZip)" LogicalName="payload.7z" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(SevenZipExe)' != '' And Exists('$(SevenZipExe)')">
+    <EmbeddedResource Include="$(SevenZipExe)" LogicalName="7zr.exe" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,2420 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=1920, height=1080, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Smart Touch Bar</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <!-- iOS 26 液态玻璃效果 SVG 滤镜 -->
+    <svg style="position: absolute; width: 0; height: 0;">
+        <defs>
+            <filter id="frosted" x="-50%" y="-50%" width="200%" height="200%">
+                <feGaussianBlur in="SourceGraphic" stdDeviation="8" result="blur" />
+                <feColorMatrix in="blur" mode="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 18 -8"
+                    result="goo" />
+                <feBlend in="SourceGraphic" in2="goo" />
+            </filter>
+        </defs>
+    </svg>
+    <div class="container">
+        <!-- 状态栏 -->
+        <div class="status-bar glass-md">
+            <div class="status-group">
+                <span class="status-item">
+                    <span class="status-icon">📶</span>
+                    <span id="wifiStatus">未连接</span>
+                </span>
+                <span class="status-item">
+                    <span class="status-icon">🔵</span>
+                    <span id="btStatus">未连接</span>
+                </span>
+                <span class="status-item">
+                    <span class="status-icon" id="serialStatusIcon">🔌</span>
+                    <span id="serialStatus">串口未连接</span>
+                </span>
+            </div>
+            <div class="status-group">
+                <span class="status-item">
+                    <span class="status-icon">↓</span>
+                    <span id="downloadSpeed">0 KB/s</span>
+                </span>
+                <span class="status-item">
+                    <span class="status-icon">↑</span>
+                    <span id="uploadSpeed">0 KB/s</span>
+                </span>
+            </div>
+        </div>
+        <!-- 主桌面 -->
+        <div class="desktop-view active" id="desktop-view">
+            <div class="pages-container" id="pagesContainer">
+                <!-- 第一页 -->
+                <div class="desktop-page active">
+                    <div class="widgets-grid">
+                        <!-- 第一行：信息展示区 -->
+                        <!-- 时间 (4x2) -->
+                        <div class="widget glass-lg w-4 h-2" style="grid-column: 1 / 5; grid-row: 1 / 3;">
+                            <div class="time-widget">
+                                <div class="time" id="currentTime">12:30</div>
+                                <div class="date" id="currentDate">11月13日 星期三</div>
+                            </div>
+                        </div>
+                        <!-- 天气 (2x2) -->
+                        <div class="widget glass-lg w-2 h-2 icon-widget" style="grid-column: 5 / 7; grid-row: 1 / 3;">
+                            <div class="weather-widget-small" id="weatherWidget" title="天气加载中">
+                                <span class="weather-icon-large" id="weatherIcon">⏳</span>
+                                <span class="temp-large" id="temperature">--°C</span>
+                            </div>
+                        </div>
+                        <!-- 音乐播放器 (4x2) -->
+                        <div class="widget glass-lg w-4 h-2 music-widget" style="grid-column: 7 / 11; grid-row: 1 / 3;"
+                            id="musicWidget">
+                            <div class="music-content">
+                                <div class="music-album">🎵</div>
+                                <div class="music-details">
+                                    <div class="music-track-info">
+                                        <div class="music-track-title" id="musicTitle">未在播放</div>
+                                        <div class="text-ellipsis-muted" id="musicArtist">等待媒体信息...</div>
+                                    </div>
+                                    <div class="music-controls-large">
+                                        <button class="btn-base btn-circle btn-xs btn-translucent btn-scale-strong"
+                                            onclick="musicPrev()">⏮</button>
+                                        <button class="btn-base btn-circle btn-sm btn-primary btn-scale-strong"
+                                            onclick="musicPlayPause()" id="musicPlayBtn">▶</button>
+                                        <button class="btn-base btn-circle btn-xs btn-translucent btn-scale-strong"
+                                            onclick="musicNext()">⏭</button>
+                                        <button class="btn-base btn-circle btn-xs btn-translucent btn-scale-strong"
+                                            onclick="switchMediaSession()" id="mediaSwitchBtn"
+                                            style="display: none;">🔄</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- 快捷键 (2x2) -->
+                        <div class="widget glass-lg w-2 h-2 icon-widget" style="grid-column: 11 / 13; grid-row: 1 / 3;"
+                            onclick="openPage('input', 'shortcuts')">
+                            <div class="widget-icon">⌨️</div>
+                            <div class="widget-label">快捷键</div>
+                        </div>
+                        <!-- Emoji (2x2) -->
+                        <div class="widget glass-lg w-2 h-2 icon-widget" style="grid-column: 13 / 15; grid-row: 1 / 3;"
+                            onclick="openPage('input', 'emoji')">
+                            <div class="widget-icon">😀</div>
+                            <div class="widget-label">表情包</div>
+                        </div>
+                        <!-- 浏览器 (2x2) -->
+                        <div class="widget glass-lg w-2 h-2 icon-widget" style="grid-column: 15 / 17; grid-row: 1 / 3;"
+                            onclick="openPage('input', 'browser')">
+                            <div class="widget-icon">🌐</div>
+                            <div class="widget-label">浏览器</div>
+                        </div>
+                        <!-- 第二行：控制区 -->
+                        <!-- 音量控制 (4x1) -->
+                        <div class="widget glass-lg w-4 h-1" style="grid-column: 1 / 5; grid-row: 3 / 4;">
+                            <div class="single-slider-compact">
+                                <div class="slider-icon-compact" id="volumeIcon" style="cursor: pointer;">🔊</div>
+                                <div class="slider-wrapper">
+                                    <input type="range" class="horizontal-slider-compact" id="volumeSlider" min="0"
+                                        max="100" value="50">
+                                </div>
+                                <div class="slider-value-compact" id="volumeValue">50%</div>
+                            </div>
+                        </div>
+                        <!-- 亮度控制 (4x1) -->
+                        <div class="widget glass-lg w-4 h-1" style="grid-column: 1 / 5; grid-row: 4 / 5;">
+                            <div class="single-slider-compact">
+                                <div class="slider-icon-compact">☀️</div>
+                                <div class="slider-wrapper">
+                                    <input type="range" class="horizontal-slider-compact" id="brightnessSlider" min="0"
+                                        max="100" value="80">
+                                </div>
+                                <div class="slider-value-compact" id="brightnessValue">80%</div>
+                            </div>
+                        </div>
+                        <!-- 性能监控 (6x4) - 扩大显示区域 -->
+                        <div class="widget glass-lg w-6 h-4" style="grid-column: 5 / 11; grid-row: 3 / 7;"
+                            onclick="openPage('monitor')">
+                            <div class="perf-widget-large">
+                                <div class="perf-overview">
+                                    <div class="perf-item-large">
+                                        <div class="perf-info">
+                                            <span class="perf-label">💻 CPU</span>
+                                            <span class="perf-value" id="miniCpuValue">45%</span>
+                                        </div>
+                                        <div class="mini-chart" id="miniCpuChart"></div>
+                                    </div>
+                                    <div class="perf-item-large">
+                                        <div class="perf-info">
+                                            <span class="perf-label">🧠 内存</span>
+                                            <span class="perf-value" id="miniMemValue">8.2 GB</span>
+                                        </div>
+                                        <div class="mini-chart" id="miniMemChart"></div>
+                                    </div>
+                                    <div class="perf-item-large">
+                                        <div class="perf-info">
+                                            <span class="perf-label">🌡️ 温度</span>
+                                            <span class="perf-value" id="miniTempValue">62°C</span>
+                                        </div>
+                                        <div class="mini-chart" id="miniTempChart"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- 便签 (6x4) - 扩大编辑区 -->
+                        <div class="widget glass-lg w-6 h-4 notes-widget"
+                            style="grid-column: 11 / 17; grid-row: 3 / 7;">
+                            <div class="notes-container">
+                                <div class="notes-header">
+                                    <span>📝 便签</span>
+                                    <button class="btn-base btn-primary btn-compact" onclick="addTodoItem()">+
+                                        待办</button>
+                                </div>
+                                <textarea class="textarea-base" id="notesTextarea"
+                                    placeholder="在这里写下你的想法... (Ctrl+Enter 添加待办)"></textarea>
+                                <div class="todo-list" id="todoList"></div>
+                            </div>
+                        </div>
+                        <!-- 第三行：常用工具 -->
+                        <!-- 设置 (2x2) -->
+                        <div class="widget glass-lg w-2 h-2 icon-widget" style="grid-column: 1 / 3; grid-row: 5 / 7;"
+                            onclick="openPage('settings')">
+                            <div class="widget-icon">⚙️</div>
+                            <div class="widget-label">设置</div>
+                        </div>
+                        <!-- 壁纸 (2x2) -->
+                        <div class="widget glass-lg w-2 h-2 icon-widget" style="grid-column: 3 / 5; grid-row: 5 / 7;"
+                            onclick="openWallpaperSettings()">
+                            <div class="widget-icon">🖼️</div>
+                            <div class="widget-label">壁纸</div>
+                        </div>
+                        <!-- 第四行：其他工具 -->
+                        <!-- 面板开关 (2x2) -->
+                        <div class="widget glass-lg w-2 h-2 icon-widget" style="grid-column: 1 / 3; grid-row: 7 / 9;"
+                            onclick="togglePanel()">
+                            <div class="widget-icon" id="panelIcon">🔦</div>
+                            <div class="widget-label" id="panelLabel">关屏</div>
+                            <div class="widget-badge" id="panelBadge">●</div>
+                        </div>
+                        <!-- 麦克风 (2x2) -->
+                        <div class="widget glass-lg w-2 h-2 icon-widget" style="grid-column: 3 / 5; grid-row: 7 / 9;"
+                            onclick="toggleMicrophone()">
+                            <div class="widget-icon" id="micIcon">🎙️</div>
+                            <div class="widget-label" id="micLabel">麦克风</div>
+                            <div class="widget-badge" id="micBadge">●</div>
+                        </div>
+                        <!-- 截图 (2x2) -->
+                        <div class="widget glass-lg w-2 h-2 icon-widget" style="grid-column: 5 / 7; grid-row: 7 / 9;"
+                            onclick="takeScreenshot()">
+                            <div class="widget-icon">📸</div>
+                            <div class="widget-label">截图</div>
+                        </div>
+                        <!-- AI 助手 (2x2) -->
+                        <div class="widget glass-lg w-2 h-2 icon-widget" style="grid-column: 7 / 9; grid-row: 7 / 9;"
+                            onclick="openPage('ai')">
+                            <div class="widget-icon">🤖</div>
+                            <div class="widget-label">AI</div>
+                        </div>
+                        <!-- 取色器 (2x2) -->
+                        <div class="widget glass-lg w-2 h-2 icon-widget" style="grid-column: 9 / 11; grid-row: 7 / 9;"
+                            onclick="openColorPicker()">
+                            <div class="widget-icon">🎨</div>
+                            <div class="widget-label">取色器</div>
+                        </div>
+                        <!-- 笔记 (2x2) -->
+                        <div class="widget glass-lg w-2 h-2 icon-widget" style="grid-column: 11 / 13; grid-row: 7 / 9;"
+                            onclick="openNotes()">
+                            <div class="widget-icon">📝</div>
+                            <div class="widget-label">笔记</div>
+                        </div>
+                        <!-- 全屏切换 (2x2) -->
+                        <div class="widget glass-lg w-2 h-2 icon-widget" style="grid-column: 13 / 15; grid-row: 7 / 9;"
+                            onclick="toggleFullscreen()">
+                            <div class="widget-icon">⛶</div>
+                            <div class="widget-label" id="fullscreenLabel">全屏</div>
+                        </div>
+                        <!-- 退出 (2x2) -->
+                        <div class="widget glass-lg w-2 h-2 icon-widget" style="grid-column: 15 / 17; grid-row: 7 / 9;"
+                            onclick="exitApp()">
+                            <div class="widget-icon">👋</div>
+                            <div class="widget-label">退出</div>
+                        </div>
+                    </div>
+                </div>
+                <!-- 第二页 -->
+                <div class="desktop-page">
+                    <div class="widgets-grid">
+                        <!-- 倒计时Widget (4x4) -->
+                        <div class="widget glass-lg w-4 h-4" style="grid-column: 13 / 17; grid-row: 1 / 5;"
+                            onclick="openCountdownPage()">
+                            <div class="countdown-widget">
+                                <div class="countdown-label" id="countdownLabel">距离周末还有</div>
+                                <div class="countdown-emoji" id="countdownEmoji">🎉</div>
+                                <div class="countdown-display">
+                                    <div class="countdown-time-group">
+                                        <div class="countdown-number glass-md-sat" id="countdownDays">0</div>
+                                        <div class="countdown-unit">天</div>
+                                    </div>
+                                    <div class="countdown-separator">:</div>
+                                    <div class="countdown-time-group">
+                                        <div class="countdown-number glass-md-sat" id="countdownHours">00</div>
+                                        <div class="countdown-unit">时</div>
+                                    </div>
+                                    <div class="countdown-separator">:</div>
+                                    <div class="countdown-time-group">
+                                        <div class="countdown-number glass-md-sat" id="countdownMinutes">00</div>
+                                        <div class="countdown-unit">分</div>
+                                    </div>
+                                    <div class="countdown-separator">:</div>
+                                    <div class="countdown-time-group">
+                                        <div class="countdown-number glass-md-sat" id="countdownSeconds">00</div>
+                                        <div class="countdown-unit">秒</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 日历Widget (8x8) -->
+                        <div class="widget glass-lg w-8 h-8" style="grid-column: 1 / 9; grid-row: 1 / 9;"
+                            id="calendarWidget">
+                            <div class="calendar-header">
+                                <div class="calendar-nav-group">
+                                    <button class="btn-base btn-glass btn-sm" id="calendarPrevYearBtn"
+                                        onclick="calendarPrevYear()">&laquo;</button>
+                                    <button class="btn-base btn-glass btn-sm" id="calendarPrevMonthBtn"
+                                        onclick="calendarPrevMonth()">&lsaquo;</button>
+                                </div>
+                                <div class="calendar-month-label-wrapper">
+                                    <div id="calendarMonthLabel" class="calendar-month-label"
+                                        onclick="calendarGoToday()">--</div>
+                                </div>
+                                <div class="calendar-nav-group">
+                                    <button class="btn-base btn-glass btn-sm" id="calendarNextMonthBtn"
+                                        onclick="calendarNextMonth()">&rsaquo;</button>
+                                    <button class="btn-base btn-glass btn-sm" id="calendarNextYearBtn"
+                                        onclick="calendarNextYear()">&raquo;</button>
+                                </div>
+                            </div>
+                            <div class="calendar-weekdays">
+                                <div class="calendar-weekday">一</div>
+                                <div class="calendar-weekday">二</div>
+                                <div class="calendar-weekday">三</div>
+                                <div class="calendar-weekday">四</div>
+                                <div class="calendar-weekday">五</div>
+                                <div class="calendar-weekday">六</div>
+                                <div class="calendar-weekday">日</div>
+                            </div>
+                            <div id="calendarDays" class="calendar-days"></div>
+                        </div>
+
+                        <!-- 系统信息，用处不大 (6x4) -->
+                        <!-- <div class="widget glass-lg w-6 h-4" style="grid-column: 7 / 13; grid-row: 1 / 5;">
+                            <div class="system-info-widget">
+                                <div class="widget-header-small">
+                                    <span>💻 系统信息</span>
+                                </div>
+                                <div class="system-info-list">
+                                    <div class="info-row">
+                                        <span class="text-muted">操作系统</span>
+                                        <span class="text-strong" id="osInfo">Windows 11 Pro</span>
+                                    </div>
+                                    <div class="info-row">
+                                        <span class="text-muted">处理器</span>
+                                        <span class="text-strong" id="cpuInfo">Intel Core i7-12700K</span>
+                                    </div>
+                                    <div class="info-row">
+                                        <span class="text-muted">内存</span>
+                                        <span class="text-strong" id="ramInfo">16 GB DDR5</span>
+                                    </div>
+                                    <div class="info-row">
+                                        <span class="text-muted">运行时间</span>
+                                        <span class="text-strong" id="uptimeInfo">2天 15小时 32分</span>
+                                    </div>
+                                    <div class="info-row">
+                                        <span class="text-muted">磁盘使用</span>
+                                        <span class="text-strong" id="diskInfo">256 GB / 512 GB</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div> -->
+                        <!-- 电子木鱼 (4x4) -->
+                        <div class="widget glass-lg w-4 h-4" style="grid-column: 9 / 13; grid-row: 1 / 5;"
+                            onclick="knockWoodenFish()">
+                            <div class="wooden-fish-widget">
+                                <div class="wooden-fish-header">
+                                    <span class="wooden-fish-title">🙏 电子木鱼</span>
+                                </div>
+                                <div class="wooden-fish-icon-container">
+                                    <div class="wooden-fish-icon-large" id="woodenFishIcon">🪵</div>
+                                </div>
+                                <div class="wooden-fish-stats">
+                                    <div class="wooden-fish-merit">
+                                        <div class="merit-label">功德</div>
+                                        <div class="merit-count" id="woodenFishCount">0</div>
+                                    </div>
+                                    <div class="wooden-fish-divider"></div>
+                                    <div class="wooden-fish-today">
+                                        <div class="today-label">今日</div>
+                                        <div class="today-count" id="woodenFishToday">0</div>
+                                    </div>
+                                </div>
+                                <div class="wooden-fish-blessing" id="woodenFishBlessing">心诚则灵 ✨</div>
+                            </div>
+                        </div>
+                        <!-- 虚拟键盘 (2x2) -->
+                        <div class="widget glass-lg w-2 h-2 icon-widget" style="grid-column: 9 / 11; grid-row: 5 / 7;"
+                            onclick="openPage('keyboard')">
+                            <div class="widget-icon">⌨️</div>
+                            <div class="widget-label">虚拟键盘</div>
+                        </div>
+                        <!-- 虚拟触摸板 (2x2) -->
+                        <div class="widget glass-lg w-2 h-2 icon-widget" style="grid-column: 11 / 13; grid-row: 5 / 7;"
+                            onclick="openPage('touchpad')">
+                            <div class="widget-icon">🖱️</div>
+                            <div class="widget-label">虚拟触摸板</div>
+                        </div>
+                        <!-- 触摸校准 (2x2) -->
+                        <div class="widget glass-lg w-2 h-2 icon-widget" style="grid-column: 9 / 11; grid-row: 7 / 9;"
+                            onclick="openTouchCalibration()">
+                            <div class="widget-icon">🎯</div>
+                            <div class="widget-label">触摸校准</div>
+                        </div>
+                        <!-- 番茄钟 (2x2) -->
+                        <div class="widget glass-lg w-2 h-2 icon-widget" style="grid-column: 11 / 13; grid-row: 7 / 9;"
+                            onclick="openPomodoro()">
+                            <div class="widget-icon">🍅</div>
+                            <div class="widget-label">番茄钟</div>
+                        </div>
+                        <!-- 蓝牙电话 Widget (2x2) -->
+                        <!-- <div class="widget glass-lg w-2 h-2 icon-widget" style="grid-column: 9 / 11; grid-row: 7 / 9;"
+                            onclick="openBluetoothPhone()">
+                            <div class="widget-icon">📞</div>
+                            <div class="widget-label">蓝牙电话</div>
+                        </div> -->
+                        <!-- 计算器 (2x2) -->
+                        <div class="widget glass-lg w-2 h-2 icon-widget" style="grid-column: 13 / 15; grid-row: 7 / 9;"
+                            onclick="openCalculator()">
+                            <div class="widget-icon">🧮</div>
+                            <div class="widget-label">计算器</div>
+                        </div>
+                        <!-- RK628配置 (2x2) -->
+                        <div class="widget glass-lg w-2 h-2 icon-widget" style="grid-column: 13 / 15; grid-row: 5 / 7;"
+                            onclick="openDisplayConfig()">
+                            <div class="widget-icon">🖥️</div>
+                            <div class="widget-label">显示配置</div>
+                        </div>
+                        <!-- 关于 (2x2) -->
+                        <div class="widget glass-lg w-2 h-2 icon-widget" style="grid-column: 15 / 17; grid-row: 5 / 7;"
+                            onclick="openPage('about')">
+                            <div class="widget-icon">ℹ️</div>
+                            <div class="widget-label">关于</div>
+                        </div>
+                        <!-- 退出 (2x2) -->
+                        <div class="widget glass-lg w-2 h-2 icon-widget" style="grid-column: 15 / 17; grid-row: 7 / 9;"
+                            onclick="exitApp()">
+                            <div class="widget-icon">👋</div>
+                            <div class="widget-label">退出</div>
+                        </div>
+                        <!-- 占位符 (16x4) -->
+                        <!-- <div class="widget glass-lg w-16 h-4 placeholder-widget"
+                            style="grid-column: 7 / 17; grid-row: 5 / 9;">
+                        </div> -->
+                    </div>
+                </div>
+            </div>
+        </div>
+        <!-- 分页指示器 -->
+        <div class="page-indicators">
+            <span class="indicator active" onclick="goToPage(0)"></span>
+            <span class="indicator" onclick="goToPage(1)"></span>
+        </div>
+        <!-- 蓝牙电话页面 -->
+        <div class="detail-page glass-xl-md" id="page-bluetooth-phone">
+            <div class="page-header">
+                <button class="btn-base btn-glass btn-inline" onclick="closePage()">← 返回</button>
+                <h2 class="page-title">蓝牙电话</h2>
+            </div>
+            <div class="page-content">
+                <div class="bt-phone-container">
+                    <!-- 左侧：通讯录和通话记录 -->
+                    <div class="phone-left-panel">
+                        <!-- 标签切换 -->
+                        <div class="phone-tabs">
+                            <button class="phone-tab active" onclick="switchPhoneTab('keypad')">
+                                <span class="phone-tab-icon">⌨️</span>
+                                <span class="phone-tab-label">拨号</span>
+                            </button>
+                            <button class="phone-tab" onclick="switchPhoneTab('contacts')">
+                                <span class="phone-tab-icon">👤</span>
+                                <span class="phone-tab-label">通讯录</span>
+                            </button>
+                            <button class="phone-tab" onclick="switchPhoneTab('history')">
+                                <span class="phone-tab-icon">🕐</span>
+                                <span class="phone-tab-label">记录</span>
+                            </button>
+                        </div>
+
+                        <!-- 通讯录内容 -->
+                        <div class="phone-tab-content" id="phoneTabContacts" style="display: none;">
+                            <div class="phone-search">
+                                <input type="text" class="input-base input-md" placeholder="搜索联系人..."
+                                    id="contactSearchInput" oninput="searchContacts()">
+                            </div>
+                            <div class="phone-contact-list" id="phoneContactList">
+                                <!-- 联系人将由JS动态生成 -->
+                            </div>
+                        </div>
+
+                        <!-- 通话记录内容 -->
+                        <div class="phone-tab-content" id="phoneTabHistory" style="display: none;">
+                            <div class="phone-history-filters">
+                                <button class="phone-filter-btn active" onclick="filterCallHistory('all')">全部</button>
+                                <button class="phone-filter-btn" onclick="filterCallHistory('missed')">未接</button>
+                                <button class="phone-filter-btn" onclick="filterCallHistory('incoming')">已接</button>
+                                <button class="phone-filter-btn" onclick="filterCallHistory('outgoing')">已拨</button>
+                            </div>
+                            <div class="phone-history-list" id="phoneHistoryList">
+                                <!-- 通话记录将由JS动态生成 -->
+                            </div>
+                        </div>
+
+                        <!-- 拨号界面内容(默认显示) -->
+                        <div class="phone-tab-content active" id="phoneTabKeypad">
+                            <div class="phone-display-area">
+                                <!-- 蓝牙状态 -->
+                                <div class="phone-bt-status" id="phoneBtStatus">
+                                    <span class="phone-bt-icon">🔵</span>
+                                    <span id="phoneBtStatusText">蓝牙未连接</span>
+                                </div>
+
+                                <!-- 号码显示 -->
+                                <div class="phone-number-display empty" id="phoneNumberDisplay">输入电话号码</div>
+
+                                <!-- 通话状态 -->
+                                <div class="phone-call-status" id="phoneCallStatus"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 右侧：拨号键盘 -->
+                    <div class="phone-right-panel">
+                        <!-- 拨号键盘 -->
+                        <div class="phone-keypad">
+                            <button class="btn-base btn-glass btn-circle" onclick="phoneAddDigit('1')">1</button>
+                            <button class="btn-base btn-glass btn-circle" onclick="phoneAddDigit('2')">
+                                2<span class="phone-letters">ABC</span>
+                            </button>
+                            <button class="btn-base btn-glass btn-circle" onclick="phoneAddDigit('3')">
+                                3<span class="phone-letters">DEF</span>
+                            </button>
+
+                            <button class="btn-base btn-glass btn-circle" onclick="phoneAddDigit('4')">
+                                4<span class="phone-letters">GHI</span>
+                            </button>
+                            <button class="btn-base btn-glass btn-circle" onclick="phoneAddDigit('5')">
+                                5<span class="phone-letters">JKL</span>
+                            </button>
+                            <button class="btn-base btn-glass btn-circle" onclick="phoneAddDigit('6')">
+                                6<span class="phone-letters">MNO</span>
+                            </button>
+
+                            <button class="btn-base btn-glass btn-circle" onclick="phoneAddDigit('7')">
+                                7<span class="phone-letters">PQRS</span>
+                            </button>
+                            <button class="btn-base btn-glass btn-circle" onclick="phoneAddDigit('8')">
+                                8<span class="phone-letters">TUV</span>
+                            </button>
+                            <button class="btn-base btn-glass btn-circle" onclick="phoneAddDigit('9')">
+                                9<span class="phone-letters">WXYZ</span>
+                            </button>
+
+                            <button class="btn-base btn-glass btn-circle" onclick="phoneAddDigit('*')">*</button>
+                            <button class="btn-base btn-glass btn-circle" onclick="phoneAddDigit('0')">
+                                0<span class="phone-letters">+</span>
+                            </button>
+                            <button class="btn-base btn-glass btn-circle" onclick="phoneAddDigit('#')">#</button>
+
+                            <!-- 第五行:空 / 呼叫 / 删除 -->
+                            <button class="btn-base" style="display: none;"></button>
+                            <button class="btn-base btn-glass btn-circle" id="phoneCallBtn"
+                                onclick="phoneCall()">📞</button>
+                            <button class="btn-base btn-glass phone-key-delete" onclick="phoneDeleteDigit()">⌫</button>
+                        </div>
+
+                        <!-- 通话中的操作按钮(默认隐藏) -->
+                        <div class="phone-call-actions" id="phoneCallActions" style="display: none;">
+                            <div class="phone-action-btn" id="phoneMuteBtn" onclick="phoneToggleMute()">
+                                <span class="phone-action-icon">🔇</span>
+                                <span class="phone-action-label">静音</span>
+                            </div>
+                            <div class="phone-action-btn" id="phoneSpeakerBtn" onclick="phoneToggleSpeaker()">
+                                <span class="phone-action-icon">🔊</span>
+                                <span class="phone-action-label">扬声器</span>
+                            </div>
+                            <div class="phone-action-btn" onclick="phoneShowKeypad()">
+                                <span class="phone-action-icon">⌨️</span>
+                                <span class="phone-action-label">键盘</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 计算器页面 -->
+        <div class="detail-page glass-xl-md" id="page-calculator">
+            <div class="page-header">
+                <button class="btn-base btn-glass btn-inline" onclick="closePage()">← 返回</button>
+                <h2 class="page-title">计算器</h2>
+            </div>
+            <div class="page-content">
+                <!-- 计算器内容将由JS动态生成 -->
+            </div>
+        </div>
+        <!-- 番茄钟页面 -->
+        <div class="detail-page glass-xl-md" id="page-pomodoro">
+            <div class="page-header">
+                <button class="btn-base btn-glass btn-inline" onclick="closePage()">← 返回</button>
+                <h2 class="page-title">番茄钟</h2>
+            </div>
+            <div class="page-content">
+                <!-- 番茄钟内容将由JS动态生成 -->
+            </div>
+        </div>
+        <!-- 倒计时配置页面 -->
+        <div class="detail-page glass-xl-md" id="page-countdown">
+            <div class="page-header">
+                <button class="btn-base btn-glass btn-inline" onclick="closePage()">← 返回</button>
+                <h2 class="page-title">倒计时设置</h2>
+            </div>
+            <div class="page-content">
+                <div class="countdown-config-page">
+                    <div class="section-block">
+                        <div class="countdown-preset-title">快速选择</div>
+                        <div class="countdown-preset-buttons">
+                            <button class="countdown-preset-btn glass-md-sat" onclick="setCountdownPreset('weekend')">
+                                <span class="icon-md">🎉</span>
+                                <span class="text-strong">周末</span>
+                            </button>
+                            <button class="countdown-preset-btn glass-md-sat" onclick="setCountdownPreset('newyear')">
+                                <span class="icon-md">🎆</span>
+                                <span class="text-strong">新年</span>
+                            </button>
+                            <button class="countdown-preset-btn glass-md-sat"
+                                onclick="setCountdownPreset('springfestival')">
+                                <span class="icon-md">🧧</span>
+                                <span class="text-strong">春节</span>
+                            </button>
+                            <button class="countdown-preset-btn glass-md-sat"
+                                onclick="setCountdownPreset('nextholiday')">
+                                <span class="icon-md">📅</span>
+                                <span class="text-strong">下一个节日</span>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="countdown-divider">或</div>
+                    <div class="countdown-custom">
+                        <!-- <div class="countdown-custom-title">自定义倒计时</div> -->
+                        <div class="countdown-form">
+                            <div class="countdown-form-group">
+                                <label for="countdownCustomLabel">事件名称</label>
+                                <input type="text" id="countdownCustomLabel" class="input-base control-md"
+                                    placeholder="例如：毕业典礼" maxlength="20">
+                            </div>
+                            <div class="countdown-form-group">
+                                <label for="countdownCustomDate">目标日期</label>
+                                <input type="datetime-local" id="countdownCustomDate" class="input-base control-md">
+                            </div>
+                            <div class="countdown-form-group">
+                                <label for="countdownCustomEmoji">表情符号</label>
+                                <select id="countdownCustomEmoji" class="select-base control-md">
+                                    <option value="🎉">🎉 庆祝</option>
+                                    <option value="🎂">🎂 生日</option>
+                                    <option value="🎓">🎓 毕业</option>
+                                    <option value="✈️">✈️ 旅行</option>
+                                    <option value="💍">💍 婚礼</option>
+                                    <option value="🎄">🎄 圣诞</option>
+                                    <option value="🎆">🎆 新年</option>
+                                    <option value="🧧">🧧 春节</option>
+                                    <option value="❤️">❤️ 情人节</option>
+                                    <option value="🎃">🎃 万圣节</option>
+                                    <option value="⭐">⭐ 重要事件</option>
+                                    <option value="🎯">🎯 目标</option>
+                                </select>
+                            </div>
+                            <button class="btn-base btn-lg btn-primary" onclick="saveCountdownConfig()">保存设置</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <!-- 虚拟键盘页面 -->
+        <div class="detail-page glass-xl-md" id="page-keyboard">
+            <div class="page-header">
+                <button class="btn-base btn-glass btn-inline" onclick="closePage()">← 返回</button>
+                <h2 class="page-title">虚拟键盘</h2>
+            </div>
+            <div class="page-content keyboard-page-content">
+                <div class="virtual-keyboard keyboard-98 panel-dark">
+                    <!-- ========== 主键盘区 ========== -->
+                    <div class="keyboard-main-area">
+                        <!-- 功能键行 (4组分组布局) -->
+                        <div class="keyboard-row-grid keyboard-row-fn">
+                            <!-- 第1组: Esc -->
+                            <div class="fn-group">
+                                <button class="key key-fn" data-key="0x29">Esc</button>
+                            </div>
+                            <!-- 第2组: F1-F4 -->
+                            <div class="fn-group">
+                                <button class="key key-fn" data-key="0x3A">F1</button>
+                                <button class="key key-fn" data-key="0x3B">F2</button>
+                                <button class="key key-fn" data-key="0x3C">F3</button>
+                                <button class="key key-fn" data-key="0x3D">F4</button>
+                            </div>
+                            <!-- 第3组: F5-F8 -->
+                            <div class="fn-group">
+                                <button class="key key-fn" data-key="0x3E">F5</button>
+                                <button class="key key-fn" data-key="0x3F">F6</button>
+                                <button class="key key-fn" data-key="0x40">F7</button>
+                                <button class="key key-fn" data-key="0x41">F8</button>
+                            </div>
+                            <!-- 第4组: F9-F12 -->
+                            <div class="fn-group">
+                                <button class="key key-fn" data-key="0x42">F9</button>
+                                <button class="key key-fn" data-key="0x43">F10</button>
+                                <button class="key key-fn" data-key="0x44">F11</button>
+                                <button class="key key-fn" data-key="0x45">F12</button>
+                            </div>
+                        </div>
+
+                        <!-- 数字行 -->
+                        <div class="keyboard-row-grid keyboard-row-number">
+                            <button class="key key-1u" data-key="0x35">`<span class="key-sub">~</span></button>
+                            <button class="key key-1u" data-key="0x1E">1<span class="key-sub">!</span></button>
+                            <button class="key key-1u" data-key="0x1F">2<span class="key-sub">@</span></button>
+                            <button class="key key-1u" data-key="0x20">3<span class="key-sub">#</span></button>
+                            <button class="key key-1u" data-key="0x21">4<span class="key-sub">$</span></button>
+                            <button class="key key-1u" data-key="0x22">5<span class="key-sub">%</span></button>
+                            <button class="key key-1u" data-key="0x23">6<span class="key-sub">^</span></button>
+                            <button class="key key-1u" data-key="0x24">7<span class="key-sub">&amp;</span></button>
+                            <button class="key key-1u" data-key="0x25">8<span class="key-sub">*</span></button>
+                            <button class="key key-1u" data-key="0x26">9<span class="key-sub">(</span></button>
+                            <button class="key key-1u" data-key="0x27">0<span class="key-sub">)</span></button>
+                            <button class="key key-1u" data-key="0x2D">-<span class="key-sub">_</span></button>
+                            <button class="key key-1u" data-key="0x2E">=<span class="key-sub">+</span></button>
+                            <button class="key key-backspace key-2u" data-key="0x2A">Backspace</button>
+                        </div>
+
+                        <!-- Tab行 -->
+                        <div class="keyboard-row-grid keyboard-row-tab">
+                            <button class="key key-modifier key-tab key-1_5u" data-key="0x2B">Tab</button>
+                            <button class="key key-1u" data-key="0x14">Q</button>
+                            <button class="key key-1u" data-key="0x1A">W</button>
+                            <button class="key key-1u" data-key="0x08">E</button>
+                            <button class="key key-1u" data-key="0x15">R</button>
+                            <button class="key key-1u" data-key="0x17">T</button>
+                            <button class="key key-1u" data-key="0x1C">Y</button>
+                            <button class="key key-1u" data-key="0x18">U</button>
+                            <button class="key key-1u" data-key="0x0C">I</button>
+                            <button class="key key-1u" data-key="0x12">O</button>
+                            <button class="key key-1u" data-key="0x13">P</button>
+                            <button class="key key-1u" data-key="0x2F">[<span class="key-sub">{</span></button>
+                            <button class="key key-1u" data-key="0x30">]<span class="key-sub">}</span></button>
+                            <button class="key key-backslash key-1_5u" data-key="0x31">\<span
+                                    class="key-sub">|</span></button>
+                        </div>
+
+                        <!-- Caps Lock行 -->
+                        <div class="keyboard-row-grid keyboard-row-caps">
+                            <button class="key key-modifier key-caps key-1_75u" data-key="0x39">Caps</button>
+                            <button class="key key-1u" data-key="0x04">A</button>
+                            <button class="key key-1u" data-key="0x16">S</button>
+                            <button class="key key-1u" data-key="0x07">D</button>
+                            <button class="key key-1u" data-key="0x09">F</button>
+                            <button class="key key-1u" data-key="0x0A">G</button>
+                            <button class="key key-1u" data-key="0x0B">H</button>
+                            <button class="key key-1u" data-key="0x0D">J</button>
+                            <button class="key key-1u" data-key="0x0E">K</button>
+                            <button class="key key-1u" data-key="0x0F">L</button>
+                            <button class="key key-1u" data-key="0x33">;<span class="key-sub">:</span></button>
+                            <button class="key key-1u" data-key="0x34">'<span class="key-sub">"</span></button>
+                            <button class="key key-enter key-2_25u" data-key="0x28">Enter</button>
+                        </div>
+
+                        <!-- Shift行 -->
+                        <div class="keyboard-row-grid keyboard-row-shift">
+                            <button class="key key-modifier key-shift-left key-2_25u"
+                                data-modifier="0xE1">Shift</button>
+                            <button class="key key-1u" data-key="0x1D">Z</button>
+                            <button class="key key-1u" data-key="0x1B">X</button>
+                            <button class="key key-1u" data-key="0x06">C</button>
+                            <button class="key key-1u" data-key="0x19">V</button>
+                            <button class="key key-1u" data-key="0x05">B</button>
+                            <button class="key key-1u" data-key="0x11">N</button>
+                            <button class="key key-1u" data-key="0x10">M</button>
+                            <button class="key key-1u" data-key="0x36">,<span class="key-sub">&lt;</span></button>
+                            <button class="key key-1u" data-key="0x37">.<span class="key-sub">&gt;</span></button>
+                            <button class="key key-1u" data-key="0x38">/<span class="key-sub">?</span></button>
+                            <button class="key key-modifier key-shift-right key-2_75u"
+                                data-modifier="0xE5">Shift</button>
+                        </div>
+
+                        <!-- 底部控制行 -->
+                        <div class="keyboard-row-grid keyboard-row-bottom">
+                            <button class="key key-modifier key-ctrl key-1_25u" data-modifier="0xE0">Ctrl</button>
+                            <button class="key key-modifier key-win key-1_25u" data-modifier="0xE3">Win</button>
+                            <button class="key key-modifier key-alt key-1_25u" data-modifier="0xE2">Alt</button>
+                            <button class="key key-space key-6_25u" data-key="0x2C"></button>
+                            <button class="key key-modifier key-alt key-1_25u" data-modifier="0xE6">Alt</button>
+                            <button class="key key-modifier key-win key-1_25u" data-modifier="0xE7">Win</button>
+                            <button class="key key-modifier key-fn-mod key-1_25u" data-key="0x65">Menu</button>
+                            <button class="key key-modifier key-ctrl key-1_25u" data-modifier="0xE4">Ctrl</button>
+                        </div>
+                    </div>
+
+                    <!-- ========== 编辑键+方向键区 ========== -->
+                    <div class="keyboard-edit-area">
+                        <!-- 第1行: PrtSc Scroll Pause (与F1-F12对齐) -->
+                        <div class="edit-row edit-row-1">
+                            <button class="key key-edit" data-key="0x46">PrtSc</button>
+                            <button class="key key-edit" data-key="0x47">Scroll</button>
+                            <button class="key key-edit" data-key="0x48">Pause</button>
+                        </div>
+
+                        <!-- 第2行: Insert Home PgUp (与数字行对齐) -->
+                        <div class="edit-row edit-row-2">
+                            <button class="key key-edit" data-key="0x49">Insert</button>
+                            <button class="key key-edit" data-key="0x4A">Home</button>
+                            <button class="key key-edit" data-key="0x4B">PgUp</button>
+                        </div>
+
+                        <!-- 第3行: Delete End PgDn (与Tab/QWER行对齐) -->
+                        <div class="edit-row edit-row-3">
+                            <button class="key key-edit" data-key="0x4C">Delete</button>
+                            <button class="key key-edit" data-key="0x4D">End</button>
+                            <button class="key key-edit" data-key="0x4E">PgDn</button>
+                        </div>
+
+                        <!-- 第4行: 空行 (与Caps行对齐) -->
+                        <div class="edit-row edit-row-4"></div>
+
+                        <!-- 第5行: ↑ (与Shift行对齐) -->
+                        <div class="edit-row edit-row-5 arrow-row-1">
+                            <span class="key-arrow-spacer"></span>
+                            <button class="key key-arrow" data-key="0x52">↑</button>
+                            <span class="key-arrow-spacer"></span>
+                        </div>
+
+                        <!-- 第6行: ← ↓ → (与底部控制行对齐) -->
+                        <div class="edit-row edit-row-6 arrow-row-2">
+                            <button class="key key-arrow" data-key="0x50">←</button>
+                            <button class="key key-arrow" data-key="0x51">↓</button>
+                            <button class="key key-arrow" data-key="0x4F">→</button>
+                        </div>
+                    </div>
+
+                    <!-- ========== 数字小键盘区 ========== -->
+                    <div class="keyboard-numpad-area">
+                        <!-- 第1行: LED指示灯 (与F1-F12对齐) -->
+                        <div class="numpad-row numpad-row-1">
+                            <div class="numpad-indicators">
+                                <span class="numpad-led" aria-label="Num Lock"></span>
+                                <span class="numpad-led" aria-label="Caps Lock"></span>
+                                <span class="numpad-led" aria-label="Scroll Lock"></span>
+                            </div>
+                        </div>
+
+                        <!-- 第2行: Num / * - (与数字行对齐) -->
+                        <div class="numpad-row numpad-row-2">
+                            <button class="key key-numpad" data-key="0x53">Num</button>
+                            <button class="key key-numpad" data-key="0x54">/<span class="key-sub">÷</span></button>
+                            <button class="key key-numpad" data-key="0x55">*<span class="key-sub">×</span></button>
+                            <button class="key key-numpad" data-key="0x56">-</button>
+                        </div>
+
+                        <!-- 第3行: 7 8 9 + (与Tab/QWER行对齐) -->
+                        <div class="numpad-row numpad-row-3">
+                            <button class="key key-numpad" data-key="0x5F">7<span class="key-sub">Home</span></button>
+                            <button class="key key-numpad" data-key="0x60">8<span class="key-sub">↑</span></button>
+                            <button class="key key-numpad" data-key="0x61">9<span class="key-sub">PgUp</span></button>
+                            <button class="key key-numpad key-numpad-plus" data-key="0x57">+</button>
+                        </div>
+
+                        <!-- 第4行: 4 5 6 (与Caps行对齐) -->
+                        <div class="numpad-row numpad-row-4">
+                            <button class="key key-numpad" data-key="0x5C">4<span class="key-sub">←</span></button>
+                            <button class="key key-numpad" data-key="0x5D">5</button>
+                            <button class="key key-numpad" data-key="0x5E">6<span class="key-sub">→</span></button>
+                        </div>
+
+                        <!-- 第5行: 1 2 3 Enter (与Shift行对齐) -->
+                        <div class="numpad-row numpad-row-5">
+                            <button class="key key-numpad" data-key="0x59">1<span class="key-sub">End</span></button>
+                            <button class="key key-numpad" data-key="0x5A">2<span class="key-sub">↓</span></button>
+                            <button class="key key-numpad" data-key="0x5B">3<span class="key-sub">PgDn</span></button>
+                            <button class="key key-numpad key-numpad-enter" data-key="0x58">Enter</button>
+                        </div>
+
+                        <!-- 第6行: 0 . (与底部控制行对齐) -->
+                        <div class="numpad-row numpad-row-6">
+                            <button class="key key-numpad key-numpad-zero" data-key="0x62">0<span
+                                    class="key-sub">Ins</span></button>
+                            <button class="key key-numpad" data-key="0x63">.<span class="key-sub">Del</span></button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 虚拟触摸板页面 -->
+        <div class="detail-page glass-xl-md no-dock" id="page-touchpad">
+            <div class="page-header">
+                <button class="btn-base btn-glass btn-inline" onclick="closePage()">← 返回</button>
+                <h2 class="page-title">虚拟触摸板</h2>
+            </div>
+            <div class="touchpad-container panel-dark">
+                <!-- 触摸区域 -->
+                <div class="touchpad-surface" id="touchpadSurface">
+                    <!-- 状态指示器 - 移到右上角 -->
+                    <div class="touchpad-status">
+                        <div class="touchpad-status-item">
+                            <span class="touchpad-status-label">触点:</span>
+                            <span class="touchpad-status-value" id="touchpadTouchCount">0</span>
+
+                            <span class="touchpad-status-label">灵敏度:</span>
+                            <div class="touchpad-sensitivity-control">
+                                <button class="btn-base btn-glass btn-circle btn-xs"
+                                    onclick="adjustSensitivity(-0.2)">−</button>
+                                <span class="touchpad-status-value" id="touchpadSensitivity">1.0×</span>
+                                <button class="btn-base btn-glass btn-circle btn-xs"
+                                    onclick="adjustSensitivity(0.2)">+</button>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- 触摸指示器会动态添加 -->
+                </div>
+                <!-- 按钮区域 -->
+                <div class="touchpad-buttons">
+                    <button class="touchpad-btn" id="touchpadBtnLeft">L</button>
+                    <button class="touchpad-btn" id="touchpadBtnRight">R</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 触摸校准向导页面 -->
+        <div class="detail-page glass-xl-md no-dock" id="page-touch-calibration">
+            <div class="page-header">
+                <button class="btn-base btn-glass btn-inline" onclick="closePage()">← 返回</button>
+                <h2 class="page-title">触摸校准向导</h2>
+            </div>
+            <div class="page-content touch-cal-page">
+                <div class="touch-cal-sidebar panel-dark">
+                    <div class="touch-cal-title">校准流程</div>
+                    <div class="touch-cal-step active" id="touchCalStepScreen">
+                        <span class="touch-cal-step-index">1</span>
+                        <div>
+                            <div class="touch-cal-step-name">确认屏幕</div>
+                            <div class="touch-cal-step-desc">先完成 Windows 触摸屏归属确认</div>
+                        </div>
+                    </div>
+                    <div class="touch-cal-step" id="touchCalStepCoords">
+                        <span class="touch-cal-step-index">2</span>
+                        <div>
+                            <div class="touch-cal-step-name">坐标采样</div>
+                            <div class="touch-cal-step-desc">依次触摸四个角的目标点</div>
+                        </div>
+                    </div>
+                    <div class="touch-cal-step" id="touchCalStepDone">
+                        <span class="touch-cal-step-index">3</span>
+                        <div>
+                            <div class="touch-cal-step-name">保存完成</div>
+                            <div class="touch-cal-step-desc">写入下位机 Flash 后重启仍生效</div>
+                        </div>
+                    </div>
+                    <div class="touch-cal-note">
+                        未完成坐标校准前，下位机不会向系统上报触摸点，避免错误触摸影响操作。请使用鼠标、触摸板或键盘完成向导按钮操作。
+                    </div>
+                </div>
+
+                <div class="touch-cal-main panel-dark">
+                    <section class="touch-cal-panel active" id="touchCalScreenPanel">
+                        <div class="touch-cal-hero">
+                            <div class="touch-cal-kicker">第一步</div>
+                            <h3>确认触摸屏对应当前设备屏幕</h3>
+                            <p>先把界面切到设备屏幕，然后启动 Windows 触摸屏归属校准。按系统提示确认这块触摸屏属于当前显示器后，再进入坐标采样。</p>
+                        </div>
+                        <div class="touch-cal-actions">
+                            <button class="btn-base btn-primary btn-lg" type="button" onclick="touchCal2SwitchToDeviceScreen()">切换到设备屏幕</button>
+                            <button class="btn-base btn-tonal btn-lg" type="button" onclick="touchCal2LaunchWindowsTouchMapper()">启动屏幕归属校准</button>
+                            <button class="btn-base btn-glass btn-lg" type="button" onclick="touchCal2GoCoordinateStep()">已完成屏幕确认，下一步</button>
+                        </div>
+                        <div class="touch-cal-status" id="touchCalScreenStatus">请先确认触摸屏归属到设备屏幕，再继续下一步。</div>
+                    </section>
+
+                    <section class="touch-cal-panel" id="touchCalCoordPanel">
+                        <div class="touch-cal-board" id="touchCalBoard">
+                            <div class="touch-cal-target" id="touchCalTarget">
+                                <span></span>
+                            </div>
+                            <div class="touch-cal-board-center">
+                                <div class="touch-cal-kicker">第二步</div>
+                                <h3 id="touchCalPromptTitle">点击“开始采样”</h3>
+                                <p id="touchCalPromptText">开始后，下位机会进入采样模式。请按屏幕上的亮点位置依次触摸四个角，每个角只点一次。</p>
+                            </div>
+                        </div>
+                        <div class="touch-cal-bottom">
+                            <div class="touch-cal-progress" id="touchCalProgress"></div>
+                            <label class="touch-cal-checkbox">
+                                <input id="touchCal2WriteFlash" type="checkbox" checked>
+                                <span>保存到下位机 Flash</span>
+                            </label>
+                            <div class="touch-cal-actions compact">
+                                <button class="btn-base btn-primary btn-lg" id="touchCalStartBtn" type="button" onclick="touchCal2Start()">开始采样</button>
+                                <button class="btn-base btn-tonal btn-lg" id="touchCalStopBtn" type="button" onclick="touchCal2Stop()">停止</button>
+                            </div>
+                        </div>
+                        <div class="touch-cal-status" id="touchCalCoordStatus">准备就绪。请先点击“开始采样”。</div>
+                    </section>
+
+                    <section class="touch-cal-panel" id="touchCalDonePanel">
+                        <div class="touch-cal-done">
+                            <div class="touch-cal-done-icon">✓</div>
+                            <h3>触摸坐标已校准</h3>
+                            <p id="touchCalDoneText">配置已写入下位机，触摸输出现在使用横屏坐标。</p>
+                            <div class="touch-cal-actions">
+                                <button class="btn-base btn-primary btn-lg" type="button" onclick="touchCal2GoCoordinateStep()">重新校准</button>
+                                <button class="btn-base btn-glass btn-lg" type="button" onclick="closePage()">返回桌面</button>
+                            </div>
+                        </div>
+                    </section>
+                </div>
+            </div>
+        </div>
+
+        <!-- Dock栏 -->
+        <div class="dock-bar">
+            <div class="dock-apps glass-xl" id="dockApps">
+                <!-- 应用将通过JS动态生成 -->
+            </div>
+        </div>
+        <!-- 输入控制页面 -->
+        <div class="detail-page glass-xl-md" id="page-input">
+            <div class="page-header">
+                <button class="btn-base btn-glass btn-inline" onclick="closePage()">← 返回</button>
+                <h2 class="page-title">输入控制</h2>
+            </div>
+            <div class="input-tabs">
+                <button class="input-tab-button btn-base btn-tab active"
+                    onclick="switchInputTab('shortcuts')">快捷键</button>
+                <button class="input-tab-button btn-base btn-tab" onclick="switchInputTab('emoji')">Emoji</button>
+                <button class="input-tab-button btn-base btn-tab" onclick="switchInputTab('browser')">浏览器</button>
+            </div>
+            <div class="page-content">
+                <!-- Shortcuts Tab -->
+                <div class="input-tab-content active" id="shortcuts-tab">
+                    <div class="shortcuts-grid" id="shortcutsGrid"></div>
+                </div>
+                <!-- Emoji Tab -->
+                <div class="input-tab-content" id="emoji-tab">
+                    <div class="emoji-grid" id="emojiGrid"></div>
+                </div>
+                <!-- Browser Tab -->
+                <div class="input-tab-content" id="browser-tab">
+                    <div class="section-block">
+                        <h3 class="section-title">导航控制</h3>
+                        <div class="browser-grid">
+                            <button class="btn-base btn-glass browser-button" onclick="browserBack()">
+                                <span class="browser-icon">◀️</span>
+                                <span>后退</span>
+                            </button>
+                            <button class="btn-base btn-glass browser-button" onclick="browserForward()">
+                                <span class="browser-icon">▶️</span>
+                                <span>前进</span>
+                            </button>
+                            <button class="btn-base btn-glass browser-button" onclick="browserRefresh()">
+                                <span class="browser-icon">🔄</span>
+                                <span>刷新</span>
+                            </button>
+                            <button class="btn-base btn-glass browser-button" onclick="browserHome()">
+                                <span class="browser-icon">🏠</span>
+                                <span>主页</span>
+                            </button>
+                            <button class="btn-base btn-glass browser-button" onclick="newTab()">
+                                <span class="browser-icon">➕</span>
+                                <span>新标签</span>
+                            </button>
+                            <button class="btn-base btn-glass browser-button" onclick="closeTab()">
+                                <span class="browser-icon">✕</span>
+                                <span>关闭标签</span>
+                            </button>
+                            <button class="btn-base btn-glass browser-button" onclick="bookmarkPage()">
+                                <span class="browser-icon">⭐</span>
+                                <span>收藏</span>
+                            </button>
+                            <button class="btn-base btn-glass browser-button" onclick="openDownloads()">
+                                <span class="browser-icon">📥</span>
+                                <span>下载</span>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="section-block">
+                        <h3 class="section-title">高级工具</h3>
+                        <div class="browser-grid">
+                            <button class="btn-base btn-glass browser-button" onclick="openHistory()">
+                                <span class="browser-icon">🕘</span>
+                                <span>历史记录</span>
+                            </button>
+                            <button class="btn-base btn-glass browser-button" onclick="openPrint()">
+                                <span class="browser-icon">🖨️</span>
+                                <span>打印</span>
+                            </button>
+                            <button class="btn-base btn-glass browser-button" onclick="openFind()">
+                                <span class="browser-icon">🔎</span>
+                                <span>查找</span>
+                            </button>
+                            <button class="btn-base btn-glass browser-button" onclick="openDevTools()">
+                                <span class="browser-icon">🔧</span>
+                                <span>开发者工具</span>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="section-block browser-section-zoom">
+                        <h3 class="section-title">缩放控制</h3>
+                        <div class="zoom-controls">
+                            <button class="btn-base btn-glass btn-circle btn-sm" onclick="zoomOut()">−</button>
+                            <span class="zoom-value" id="zoom-value">100%</span>
+                            <button class="btn-base btn-glass btn-circle btn-sm" onclick="zoomIn()">+</button>
+                            <button class="btn-base btn-glass btn-sm" onclick="zoomReset()">重置</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <!-- 性能监控页面 -->
+        <div class="detail-page glass-xl-md" id="page-monitor">
+            <div class="page-header">
+                <button class="btn-base btn-glass btn-inline" onclick="closePage()">← 返回</button>
+                <h2 class="page-title">性能监控</h2>
+            </div>
+            <div class="page-content">
+                <div class="monitor-grid">
+                    <div class="monitor-card">
+                        <div class="monitor-header">
+                            <span class="monitor-icon">💻</span>
+                            <span class="monitor-title">CPU</span>
+                            <span class="monitor-value" id="cpuValue">45%</span>
+                        </div>
+                        <canvas id="cpuChart" class="chart-canvas"></canvas>
+                    </div>
+                    <div class="monitor-card">
+                        <div class="monitor-header">
+                            <span class="monitor-icon">🧠</span>
+                            <span class="monitor-title">内存</span>
+                            <span class="monitor-value" id="memValue">8.2/16 GB</span>
+                        </div>
+                        <canvas id="memChart" class="chart-canvas"></canvas>
+                    </div>
+                    <div class="monitor-card">
+                        <div class="monitor-header">
+                            <span class="monitor-icon">🌡️</span>
+                            <span class="monitor-title">温度</span>
+                            <span class="monitor-value" id="tempValue">62°C</span>
+                        </div>
+                        <canvas id="tempChart" class="chart-canvas"></canvas>
+                    </div>
+                    <div class="monitor-card">
+                        <div class="monitor-header">
+                            <span class="monitor-icon">🌐</span>
+                            <span class="monitor-title">网络</span>
+                            <span class="monitor-value" id="netValue">↓2.5 ↑1.2 MB/s</span>
+                        </div>
+                        <canvas id="netChart" class="chart-canvas"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <!-- 设置页面 -->
+        <div class="detail-page glass-xl-md" id="page-settings">
+            <div class="page-header">
+                <button class="btn-base btn-glass btn-inline" onclick="closePage()">← 返回</button>
+                <h2 class="page-title">设置</h2>
+            </div>
+            <div class="page-content">
+                <div class="settings-container">
+                    <div class="settings-shell">
+                        <div class="settings-nav panel-dark">
+                            <button class="settings-nav-item active" type="button" data-settings-target="settings-wifi">
+                                <span class="nav-icon">📶</span>
+                                <span class="nav-label">Wi-Fi</span>
+                            </button>
+                            <button class="settings-nav-item" type="button" data-settings-target="settings-bluetooth">
+                                <span class="nav-icon">🔵</span>
+                                <span class="nav-label">蓝牙</span>
+                            </button>
+                            <button class="settings-nav-item" type="button" data-settings-target="settings-audio">
+                                <span class="nav-icon">🎵</span>
+                                <span class="nav-label">音频</span>
+                            </button>
+                            <button class="settings-nav-item" type="button" data-settings-target="settings-language">
+                                <span class="nav-icon">🌍</span>
+                                <span class="nav-label">语言</span>
+                            </button>
+                            <button class="settings-nav-item" type="button" data-settings-target="settings-apps">
+                                <span class="nav-icon">📱</span>
+                                <span class="nav-label">Dock</span>
+                            </button>
+                            <button class="settings-nav-item" type="button" data-settings-target="settings-update">
+                                <span class="nav-icon">🔄</span>
+                                <span class="nav-label">更新</span>
+                            </button>
+                            <button class="settings-nav-item" type="button" data-settings-target="settings-thresholds">
+                                <span class="nav-icon">📊</span>
+                                <span class="nav-label">监控</span>
+                            </button>
+                        </div>
+                        <div class="settings-detail">
+                            <section class="settings-section panel-dark active" id="settings-wifi">
+                                <h3>📶 Wi-Fi</h3>
+                                <div class="info-card">
+                                    <div class="settings-row" onclick="toggleWifiSwitch()">
+                                        <div class="settings-row-label">
+                                            <span class="icon-md">📡</span>
+                                            <span>Wi-Fi</span>
+                                        </div>
+                                        <div class="settings-row-control">
+                                            <div class="ios-switch" id="wifiSwitch">
+                                                <input type="checkbox" id="wifiSwitchInput">
+                                                <span class="ios-switch-slider"></span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="settings-row" id="wifiNetworkName" style="display: none;">
+                                        <div class="settings-row-label">
+                                            <span>🌐</span>
+                                            <span>当前网络</span>
+                                        </div>
+                                        <div class="settings-row-value">
+                                            <span id="currentWifiName">未连接</span>
+                                        </div>
+                                    </div>
+                                    <div class="settings-row">
+                                        <div class="settings-row-label">
+                                            <span>🏷️</span>
+                                            <span>设备 MAC</span>
+                                        </div>
+                                        <div class="settings-row-value">
+                                            <span id="wifiDeviceMac">--</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="device-list-container" id="wifiNetworksContainer" style="display: none;">
+                                    <div class="list-stack" id="wifiList"></div>
+                                </div>
+                            </section>
+                            <section class="settings-section panel-dark" id="settings-bluetooth">
+                                <h3>🔵 蓝牙</h3>
+                                <div class="info-card">
+                                    <div class="settings-row" onclick="toggleBluetoothSwitch()">
+                                        <div class="settings-row-label">
+                                            <span class="icon-md">📻</span>
+                                            <span>蓝牙</span>
+                                        </div>
+                                        <div class="settings-row-control">
+                                            <div class="ios-switch" id="bluetoothSwitch">
+                                                <input type="checkbox" id="bluetoothSwitchInput">
+                                                <span class="ios-switch-slider"></span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="settings-row" id="bluetoothDeviceName" style="display: none;">
+                                        <div class="settings-row-label">
+                                            <span>🎧</span>
+                                            <span>当前设备</span>
+                                        </div>
+                                        <div class="settings-row-value">
+                                            <span id="currentBluetoothDevice">未连接</span>
+                                        </div>
+                                    </div>
+                                    <div class="settings-row" id="bluetoothModeRow" style="display: none;">
+                                        <div class="settings-row-label">
+                                            <span>🧭</span>
+                                            <span>模式</span>
+                                        </div>
+                                        <div class="settings-row-control" style="flex: 1; max-width: 240px;">
+                                            <select id="bluetoothModeSelect" class="select-base control-md">
+                                                <option value="2">发射（连耳机）</option>
+                                                <option value="1">接收（连手机）</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div class="settings-row">
+                                        <div class="settings-row-label">
+                                            <span>🏷️</span>
+                                            <span>设备 MAC</span>
+                                        </div>
+                                        <div class="settings-row-value">
+                                            <span id="bluetoothDeviceMac">--</span>
+                                        </div>
+                                    </div>
+
+                                    <div class="settings-row" id="bluetoothLocalNameRow" style="display: none;">
+                                        <div class="settings-row-label">
+                                            <span>🪪</span>
+                                            <span>本机名称</span>
+                                        </div>
+                                        <div class="settings-row-value"
+                                            style="display:flex; align-items:center; gap:10px;">
+                                            <span id="bluetoothLocalName" class="text-ellipsis"
+                                                style="max-width: 160px;">--</span>
+                                            <button class="btn-base btn-compact btn-tonal" type="button"
+                                                onclick="renameLocalBluetoothDevice()">改名</button>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="device-list-container" id="bluetoothDevicesContainer"
+                                    style="display: none;">
+                                    <div class="list-stack" id="bluetoothList"></div>
+                                </div>
+                            </section>
+                            <section class="settings-section panel-dark" id="settings-audio">
+                                <h3>🎵 音频</h3>
+                                <div class="info-card">
+                                    <div class="settings-row">
+                                        <div class="settings-row-label">
+                                            <span class="icon-md">🔊</span>
+                                            <span>当前本地播放来源</span>
+                                        </div>
+                                        <div class="settings-row-control settings-row-control-wide">
+                                            <select id="audioLocalRouteSelect" class="select-base control-md">
+                                                <option value="hdmi">HDMI</option>
+                                                <option value="uac">UAC</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div class="settings-row">
+                                        <div class="settings-row-label">
+                                            <span class="icon-md">📡</span>
+                                            <span>蓝牙输出来源</span>
+                                        </div>
+                                        <div class="settings-row-control settings-row-control-wide">
+                                            <select id="audioBluetoothRouteSelect" class="select-base control-md">
+                                                <option value="hdmi">HDMI</option>
+                                                <option value="uac">UAC</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div class="settings-row">
+                                        <div class="settings-row-label">
+                                            <span>📝</span>
+                                            <span>说明</span>
+                                        </div>
+                                        <div class="settings-row-value settings-row-value-multiline">
+                                            本地播放决定 DAC 当前监听来源；蓝牙输出决定蓝牙发射取流来源。
+                                        </div>
+                                    </div>
+                                </div>
+                            </section>
+                            <section class="settings-section panel-dark" id="settings-language">
+                                <h3>🌍 语言</h3>
+                                <div class="info-card">
+                                    <div class="settings-row">
+                                        <div class="settings-row-label">
+                                            <span class="icon-md">🗣️</span>
+                                            <span>系统语言</span>
+                                        </div>
+                                        <div class="settings-row-control" style="flex: 1; max-width: 240px;">
+                                            <select id="languageSelect" class="select-base control-md">
+                                                <option value="zh-CN">简体中文</option>
+                                                <!-- <option value="zh-TW">繁體中文</option>
+                                                <option value="en">English</option>
+                                                <option value="ja">日本語</option> -->
+                                            </select>
+                                        </div>
+                                    </div>
+                                </div>
+                            </section>
+                            <section class="settings-section panel-dark" id="settings-apps">
+                                <div class="settings-section-header">
+                                    <h3>📱 Dock 管理</h3>
+                                    <button class="btn-base btn-compact btn-tonal" id="addApp">
+                                        <span>🔄</span>
+                                        <span>刷新</span>
+                                    </button>
+                                </div>
+                                <div class="info-card dock-manager-hint">
+                                    <div class="hint-content">
+                                        <span class="hint-icon">💡</span>
+                                        <span class="hint-text">点击应用启动，点击右侧按钮添加到 Dock</span>
+                                    </div>
+                                </div>
+                                <div class="apps-list" id="appsList"></div>
+                            </section>
+                            <section class="settings-section panel-dark" id="settings-update">
+                                <h3>🔄 系统更新</h3>
+                                <div class="update-dashboard">
+                                    <div class="update-card update-card-primary">
+                                        <div class="update-card-header">
+                                            <div class="update-icon">🔄</div>
+                                            <div class="update-details">
+                                                <div class="update-kicker">在线更新</div>
+                                                <div class="update-version">当前版本: <span id="currentVersion">v1.0.0</span>
+                                                </div>
+                                                <div class="text-muted" id="updateStatus">准备就绪</div>
+                                            </div>
+                                        </div>
+                                        <div class="update-security-info">
+                                            <div class="security-badge">
+                                                <span class="badge-icon">🔐</span>
+                                                <span class="badge-text">安全更新已启用</span>
+                                            </div>
+                                            <div class="security-features">
+                                                <div class="security-feature">TLS 安全通信</div>
+                                                <div class="security-feature">AES 固件加密</div>
+                                                <div class="security-feature">SHA256 完整性校验</div>
+                                            </div>
+                                        </div>
+                                        <div class="update-buttons">
+                                            <button class="btn-base btn-lg btn-primary" onclick="checkSecureUpdate()"
+                                                id="checkUpdateBtn">
+                                                <span class="btn-icon">🔍</span>
+                                                <span>检查更新</span>
+                                            </button>
+                                            <button class="btn-base btn-lg btn-danger" onclick="startSecureUpdate()"
+                                                id="updateBtn" style="display: none;">
+                                                <span class="btn-icon">⬇️</span>
+                                                <span>开始安全更新</span>
+                                            </button>
+                                        </div>
+                                        <div class="update-progress" id="updateProgress" style="display: none;">
+                                            <div class="progress-bar">
+                                                <div class="progress-fill" id="updateProgressFill"></div>
+                                            </div>
+                                            <div class="progress-text" id="updateProgressText">0%</div>
+                                            <div class="progress-details" id="updateProgressDetails">准备中...</div>
+                                        </div>
+                                    </div>
+
+                                    <div class="update-card update-card-manual">
+                                        <div class="update-card-header">
+                                            <div class="update-icon">🛠️</div>
+                                            <div class="update-details">
+                                                <div class="update-kicker">维护工具</div>
+                                                <div class="update-version">手动固件更新</div>
+                                                <div class="text-muted">选择 sdk.elf 文件进行本地烧录</div>
+                                            </div>
+                                        </div>
+                                        <div class="manual-update-form">
+                                            <div class="manual-update-path-row">
+                                                <input type="text" id="manualUpdatePath" class="input-base control-md"
+                                                    placeholder="选择或输入 sdk.elf 路径...">
+                                                <button class="btn-base btn-compact btn-tonal"
+                                                    onclick="browseFirmwareFile()" title="浏览文件">
+                                                    📂 浏览
+                                                </button>
+                                            </div>
+                                            <label class="flag-checkbox manual-update-preserve">
+                                                <input type="checkbox" id="manualUpdatePreserveUserData" checked>
+                                                <span>保留用户数据（取消勾选将全量清空）</span>
+                                            </label>
+                                            <div class="manual-update-warning">
+                                                取消勾选会执行 -format all，清空 VM、USER、FlashDB、EXTFLASH 等数据区。
+                                            </div>
+                                        </div>
+                                        <div class="update-buttons">
+                                            <button class="btn-base btn-lg btn-primary" onclick="startManualUpdate()"
+                                                id="manualUpdateBtn">
+                                                <span class="btn-icon">🚀</span>
+                                                <span>开始烧录</span>
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </section>
+                            <section class="settings-section panel-dark" id="settings-thresholds">
+                                <h3>📊 监控阈值</h3>
+                                <div class="info-card">
+                                    <div class="info-card-header">
+                                        <span class="icon-md">🌡️</span>
+                                        <span class="info-card-title">CPU温度监控</span>
+                                    </div>
+                                    <div class="info-card-content">
+                                        <div class="settings-row">
+                                            <div class="settings-row-label">
+                                                <span>⚠️</span>
+                                                <span>警告温度</span>
+                                            </div>
+                                            <div class="settings-row-control">
+                                                <input type="number" id="cpuTempWarning" class="input-base" value="70"
+                                                    min="50" max="100" step="5">
+                                            </div>
+                                        </div>
+                                        <div class="settings-row">
+                                            <div class="settings-row-label">
+                                                <span>🔥</span>
+                                                <span>危险温度</span>
+                                            </div>
+                                            <div class="settings-row-control">
+                                                <input type="number" id="cpuTempDanger" class="input-base" value="85"
+                                                    min="60" max="120" step="5">
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="info-card">
+                                    <div class="info-card-header">
+                                        <span class="icon-md">🧠</span>
+                                        <span class="info-card-title">内存使用监控</span>
+                                    </div>
+                                    <div class="info-card-content">
+                                        <div class="settings-row">
+                                            <div class="settings-row-label">
+                                                <span>⚠️</span>
+                                                <span>警告阈值</span>
+                                            </div>
+                                            <div class="settings-row-control">
+                                                <input type="number" id="memoryWarning" class="input-base" value="80"
+                                                    min="50" max="100" step="5">
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </section>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <!-- 笔记页面 -->
+        <div class="detail-page glass-xl-md no-dock" id="page-notes">
+            <div class="page-header">
+                <button class="btn-base btn-glass btn-inline" onclick="closePage()">← 返回</button>
+                <h2 class="page-title">📝 笔记</h2>
+            </div>
+            <div class="page-content">
+                <div class="settings-container">
+                    <div class="settings-shell">
+                        <!-- 左侧：笔记列表 -->
+                        <div class="settings-nav panel-dark" id="notes-nav">
+                            <div class="notes-nav-header">
+                                <button class="btn-base btn-md btn-primary" onclick="createNewNote()">
+                                    <span>➕</span>
+                                    <span>新建</span>
+                                </button>
+                                <button class="btn-base btn-md btn-success" onclick="exportAllNotes()">
+                                    <span>📤</span>
+                                    <span>导出</span>
+                                </button>
+                            </div>
+                            <div class="notes-list" id="notesList">
+                                <!-- 笔记列表将通过 JS 动态生成 -->
+                            </div>
+                        </div>
+                        <!-- 右侧：笔记内容 -->
+                        <div class="settings-detail">
+                            <section class="settings-section panel-dark active" id="note-editor-section">
+                                <div class="note-editor-container">
+                                    <!-- 右栏标题区域 -->
+                                    <div class="note-right-header">
+                                        <input type="text" id="noteTitle" class="note-title-input"
+                                            placeholder="无标题笔记" />
+                                        <div class="note-actions">
+                                            <button class="btn-base btn-sm btn-success" onclick="toggleNotePreview()"
+                                                id="previewToggle">
+                                                <span>👁️</span>
+                                                <span>预览</span>
+                                            </button>
+                                            <button class="btn-base btn-sm btn-warning" onclick="exportCurrentNote()">
+                                                <span>📤</span>
+                                                <span>导出</span>
+                                            </button>
+                                            <button class="btn-base btn-sm btn-danger" onclick="deleteCurrentNote()">
+                                                <span>🗑️</span>
+                                                <span>删除</span>
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <!-- 编辑器和预览区域 -->
+                                    <div class="note-content-area">
+                                        <div class="note-editor-wrapper" id="editorWrapper">
+                                            <textarea id="noteContent" class="textarea-base"
+                                                placeholder="开始写点什么（支持 Markdown 语法）..."></textarea>
+                                            <div class="note-word-count">
+                                                <span class="text-muted" id="noteWordCount">0 字</span>
+                                            </div>
+                                        </div>
+                                        <div class="note-preview-wrapper" id="previewWrapper" style="display: none;">
+                                            <div class="note-preview" id="notePreview"></div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </section>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="detail-page glass-xl-md" id="page-rk628-config">
+            <div class="page-header">
+                <button class="btn-base btn-glass btn-inline" onclick="closePage()">← 返回</button>
+                <h2 class="page-title">显示配置</h2>
+                <div class="rk628-config-status">
+                    <div class="rk628-quick-status-pill">
+                        <label>状态</label>
+                        <div class="edid-status" id="rk628-quick-status"><span class="status-dot"></span><span>未开始</span></div>
+                    </div>
+                    <div class="rk628-quick-status-pill">
+                        <label>当前输入</label>
+                        <div class="edid-counter" id="rk628-quick-input">-</div>
+                    </div>
+                </div>
+            </div>
+            <div class="rk628-config-tabsbar">
+                <div class="input-tabs">
+                    <button class="input-tab-button btn-base btn-tab active" data-rk628-tab="src-mode"
+                        onclick="switchRK628Tab('src-mode')">HDMI输入</button>
+                    <button class="input-tab-button btn-base btn-tab" data-rk628-tab="dst-live" onclick="switchRK628Tab('dst-live')">屏幕输出</button>
+                    <button class="input-tab-button btn-base btn-tab" data-rk628-tab="init-seq" onclick="switchRK628Tab('init-seq')">初始化序列</button>
+                    <button class="input-tab-button btn-base btn-tab" data-rk628-tab="edid" onclick="switchRK628Tab('edid')">EDID配置</button>
+                    <button class="input-tab-button btn-base btn-tab" data-rk628-tab="edid-modes" onclick="switchRK628Tab('edid-modes')">模式列表</button>
+                    <button class="input-tab-button btn-base btn-tab" data-rk628-tab="edid-tuning" onclick="switchRK628Tab('edid-tuning')">快速调参</button>
+                    <button class="input-tab-button btn-base btn-tab" data-rk628-tab="debug-log" onclick="switchRK628Tab('debug-log')">调试日志</button>
+                </div>
+            </div>
+            <!-- 源模式配置 -->
+            <div class="input-tab-content active" id="tab-src-mode">
+                <div class="page-content">
+                    <div class="display-config-section">
+                        <!-- 可视化时序图 -->
+                        <div class="timing-diagram panel-dark">
+                            <!-- 水平时序可视化 -->
+                            <div class="timing-section">
+                                <div class="timing-label">水平时序 (H)</div>
+                                <div class="timing-visual horizontal-timing">
+                                    <div class="timing-part hsync">
+                                        <div class="timing-input-wrapper">
+                                            <label>同步</label>
+                                            <input type="number" id="src-hsync-len" placeholder="20"
+                                                oninput="updateSrcTiming()">
+                                        </div>
+                                    </div>
+                                    <div class="timing-part hback">
+                                        <div class="timing-input-wrapper">
+                                            <label>后肩</label>
+                                            <input type="number" id="src-hback" placeholder="80"
+                                                oninput="updateSrcTiming()">
+                                        </div>
+                                    </div>
+                                    <div class="timing-part hactive">
+                                        <div class="timing-input-wrapper">
+                                            <label>有效</label>
+                                            <input type="number" id="src-hdisplay" placeholder="1080"
+                                                oninput="updateSrcTiming()">
+                                        </div>
+                                    </div>
+                                    <div class="timing-part hfront">
+                                        <div class="timing-input-wrapper">
+                                            <label>前肩</label>
+                                            <input type="number" id="src-hfront" placeholder="80"
+                                                oninput="updateSrcTiming()">
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="timing-total">
+                                    总计: <span id="src-htotal-display">1260</span> 像素
+                                </div>
+                            </div>
+                            <!-- 垂直时序可视化 -->
+                            <div class="timing-section">
+                                <div class="timing-label">垂直时序 (V)</div>
+                                <div class="timing-visual vertical-timing">
+                                    <div class="timing-part vsync">
+                                        <div class="timing-input-wrapper">
+                                            <label>同步</label>
+                                            <input type="number" id="src-vsync-len" placeholder="10"
+                                                oninput="updateSrcTiming()">
+                                        </div>
+                                    </div>
+                                    <div class="timing-part vback">
+                                        <div class="timing-input-wrapper">
+                                            <label>后肩</label>
+                                            <input type="number" id="src-vback" placeholder="20"
+                                                oninput="updateSrcTiming()">
+                                        </div>
+                                    </div>
+                                    <div class="timing-part vactive">
+                                        <div class="timing-input-wrapper">
+                                            <label>有效</label>
+                                            <input type="number" id="src-vdisplay" placeholder="1920"
+                                                oninput="updateSrcTiming()">
+                                        </div>
+                                    </div>
+                                    <div class="timing-part vfront">
+                                        <div class="timing-input-wrapper">
+                                            <label>前肩</label>
+                                            <input type="number" id="src-vfront" placeholder="20"
+                                                oninput="updateSrcTiming()">
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="timing-total">
+                                    总计: <span id="src-vtotal-display">1970</span> 像素
+                                </div>
+                            </div>
+                        </div>
+                        <!-- 右侧参数列：频点、刷新率、Polarity -->
+                        <div class="timing-row panel-dark">
+                            <!-- 频点推荐 -->
+                            <div class="timing-section clock-section">
+                                <div class="timing-label">
+                                    <span>频点</span>
+                                </div>
+                                <div class="clock-inline-group">
+                                    <select id="src-clock" class="select-base control-sm clock-select-inline"></select>
+                                    <span class="clock-unit-inline">KHz</span>
+                                </div>
+                            </div>
+                            <!-- 刷新率 -->
+                            <div class="timing-section fps-section">
+                                <div class="timing-label">刷新率</div>
+                                <div class="fps-input-group">
+                                    <input type="number" id="src-fps" placeholder="60" value="60"
+                                        oninput="updateSrcTiming()">
+                                    <span class="fps-unit">Hz</span>
+                                </div>
+                            </div>
+                            <!-- Polarity -->
+                            <div class="timing-section flags-section">
+                                <div class="timing-label">Polarity</div>
+                                <div class="flags-group">
+                                    <label class="flag-checkbox">
+                                        <input type="checkbox" id="src-hsync-positive" checked>
+                                        <span>HSYNC+</span>
+                                    </label>
+                                    <label class="flag-checkbox">
+                                        <input type="checkbox" id="src-vsync-positive" checked>
+                                        <span>VSYNC+</span>
+                                    </label>
+                                    <input type="hidden" id="src-flags" value="5">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- HDMI输入操作按钮 -->
+                    <div class="tab-actions">
+                        <button class="btn-base btn-inline btn-tonal is-warning" onclick="resetRK628SrcToDefault()">
+                            <span>⚠️</span>
+                            <span>恢复默认</span>
+                        </button>
+                        <button class="btn-base btn-inline btn-tonal is-primary" onclick="applySrcConfig()">
+                            <span>✅</span>
+                            <span>保存并应用</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+            <!-- 屏幕输出（调试/实时覆盖 + 可选写Flash） -->
+            <div class="input-tab-content" id="tab-dst-live">
+                <div class="page-content">
+                    <div class="display-config-section">
+                        <!-- 可视化时序图（与屏幕输出一致，但字段独立） -->
+                        <div class="timing-diagram panel-dark">
+                            <div class="timing-section">
+                                <div class="timing-label">水平时序 (H)</div>
+                                <div class="timing-visual horizontal-timing">
+                                    <div class="timing-part hsync">
+                                        <div class="timing-input-wrapper">
+                                            <label>同步</label>
+                                            <input type="number" id="rt-hsync-len" placeholder="10" oninput="rk628RtUpdateTiming()">
+                                        </div>
+                                    </div>
+                                    <div class="timing-part hback">
+                                        <div class="timing-input-wrapper">
+                                            <label>后肩</label>
+                                            <input type="number" id="rt-hback" placeholder="70" oninput="rk628RtUpdateTiming()">
+                                        </div>
+                                    </div>
+                                    <div class="timing-part hactive">
+                                        <div class="timing-input-wrapper">
+                                            <label>有效</label>
+                                            <input type="number" id="rt-hdisplay" placeholder="1080" oninput="rk628RtUpdateTiming()">
+                                        </div>
+                                    </div>
+                                    <div class="timing-part hfront">
+                                        <div class="timing-input-wrapper">
+                                            <label>前肩</label>
+                                            <input type="number" id="rt-hfront" placeholder="140" oninput="rk628RtUpdateTiming()">
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="timing-total">
+                                    总计: <span id="rt-htotal-display">-</span> 像素
+                                </div>
+                            </div>
+
+                            <div class="timing-section">
+                                <div class="timing-label">垂直时序 (V)</div>
+                                <div class="timing-visual vertical-timing">
+                                    <div class="timing-part vsync">
+                                        <div class="timing-input-wrapper">
+                                            <label>同步</label>
+                                            <input type="number" id="rt-vsync-len" placeholder="1" oninput="rk628RtUpdateTiming()">
+                                        </div>
+                                    </div>
+                                    <div class="timing-part vback">
+                                        <div class="timing-input-wrapper">
+                                            <label>后肩</label>
+                                            <input type="number" id="rt-vback" placeholder="10" oninput="rk628RtUpdateTiming()">
+                                        </div>
+                                    </div>
+                                    <div class="timing-part vactive">
+                                        <div class="timing-input-wrapper">
+                                            <label>有效</label>
+                                            <input type="number" id="rt-vdisplay" placeholder="1920" oninput="rk628RtUpdateTiming()">
+                                        </div>
+                                    </div>
+                                    <div class="timing-part vfront">
+                                        <div class="timing-input-wrapper">
+                                            <label>前肩</label>
+                                            <input type="number" id="rt-vfront" placeholder="5" oninput="rk628RtUpdateTiming()">
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="timing-total">
+                                    总计: <span id="rt-vtotal-display">-</span> 像素
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 右侧参数列：像素时钟、Lane Rate、Polarity -->
+                        <div class="timing-row panel-dark">
+                            <div class="timing-section clock-section">
+                                <div class="timing-label"><span>像素时钟</span></div>
+                                <div class="clock-inline-group">
+                                    <input type="number" id="rt-clock" class="clock-input-inline" placeholder="160000" oninput="rk628RtUpdateTiming()">
+                                    <span class="clock-unit-inline">KHz</span>
+                                </div>
+                            </div>
+                            <div class="timing-section fps-section">
+                                <div class="timing-label">Lane Rate</div>
+                                <div class="fps-input-group">
+                                    <input type="number" id="rt-lane-rate" placeholder="1080" value="0" min="0" max="1500">
+                                    <span class="fps-unit">Mbps</span>
+                                </div>
+                            </div>
+                            <div class="timing-section flags-section">
+                                <div class="timing-label">Polarity</div>
+                                <div class="flags-group">
+                                    <label class="flag-checkbox">
+                                        <input type="checkbox" id="rt-hsync-positive">
+                                        <span>HSYNC+</span>
+                                    </label>
+                                    <label class="flag-checkbox">
+                                        <input type="checkbox" id="rt-vsync-positive">
+                                        <span>VSYNC+</span>
+                                    </label>
+                                    <input type="hidden" id="rt-flags" value="0">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="tab-actions">
+                        <button class="btn-base btn-inline btn-tonal" onclick="rk628RtReload()">
+                            <span>🔄</span>
+                            <span>从下位机读取</span>
+                        </button>
+                        <button class="btn-base btn-inline btn-tonal is-primary" onclick="rk628RtApply()">
+                            <span>✅</span>
+                            <span>应用（不写Flash）</span>
+                        </button>
+                        <button class="btn-base btn-inline btn-tonal is-warning" onclick="rk628RtWriteFlash()">
+                            <span>💾</span>
+                            <span>写入Flash</span>
+                        </button>
+                        <button class="btn-base btn-inline btn-tonal is-warning" onclick="rk628QuickHardRestart()">
+                            <span>🧯</span>
+                            <span>硬重启RK628</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 初始化序列（调试用） -->
+            <div class="input-tab-content" id="tab-init-seq">
+                <div class="page-content">
+                    <div class="display-config-section">
+                        <div class="panel-dark rk628-initseq-panel">
+                            <div class="rk628-initseq-head">
+                                <div class="rk628-initseq-title">初始化序列</div>
+                                <div class="rk628-initseq-subtitle">每行格式：DT DELAY LEN PAYLOAD...（均为16进制字节）</div>
+                            </div>
+                            <textarea id="rk628-init-seq-text" class="rk628-initseq-textarea" spellcheck="false" placeholder="（空）打开本页时会自动从下位机读取；点击‘应用’后将保存到本地缓存"></textarea>
+                        </div>
+
+                        <div class="panel-dark rk628-initseq-side">
+                            <div class="rk628-initseq-actions">
+                                <button class="btn-base btn-inline btn-tonal" onclick="rk628InitSeqReload()">
+                                    <span>🔄</span>
+                                    <span>从下位机读取</span>
+                                </button>
+
+                                <div class="rk628-initseq-modeflags">
+                                    <div class="rk628-initseq-modeflags-title" style="font-family: var(--font-family-mono);">/* .mode_flags */</div>
+                                    <div class="rk628-initseq-modeflags-grid">
+                                        <label class="flag-checkbox"><input type="checkbox" id="initseq-flag-video" checked><span>VIDEO</span></label>
+                                        <label class="flag-checkbox"><input type="checkbox" id="initseq-flag-burst" checked><span>VIDEO_BURST</span></label>
+                                        <label class="flag-checkbox"><input type="checkbox" id="initseq-flag-syncpulse"><span>VIDEO_SYNC_PULSE</span></label>
+                                        <label class="flag-checkbox"><input type="checkbox" id="initseq-flag-hfp"><span>VIDEO_HFP</span></label>
+                                        <label class="flag-checkbox"><input type="checkbox" id="initseq-flag-hbp"><span>VIDEO_HBP</span></label>
+                                        <label class="flag-checkbox"><input type="checkbox" id="initseq-flag-eot" checked><span>EOT_PACKET</span></label>
+                                        <label class="flag-checkbox"><input type="checkbox" id="initseq-flag-noncont"><span>CLOCK_NON_CONTINUOUS</span></label>
+                                        <label class="flag-checkbox"><input type="checkbox" id="initseq-flag-lpm" checked><span>LPM</span></label>
+                                    </div>
+                                    <div class="rk628-initseq-modeflags-value" style="font-family: var(--font-family-mono);">mode_flags: <span id="initseq-modeflags-value">0x00000000</span></div>
+                                </div>
+
+                                <button class="btn-base btn-inline btn-tonal is-primary" onclick="rk628InitSeqApply()">
+                                    <span>✅</span>
+                                    <span>应用（不写Flash）</span>
+                                </button>
+
+                                <button class="btn-base btn-inline btn-tonal is-warning" onclick="rk628InitSeqWriteFlash()">
+                                    <span>💾</span>
+                                    <span>写入Flash并硬重启</span>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <!-- EDID配置 -->
+            <div class="input-tab-content" id="tab-edid">
+                <div class="page-content">
+                    <div class="edid-container">
+                        <!-- 左侧Hex编辑器 -->
+                        <div class="panel-dark">
+                            <div class="hex-editor">
+                                <div class="hex-editor-header">
+                                    <div class="hex-offset-header">偏移</div>
+                                    <div class="hex-bytes-header">
+                                        <span class="hex-byte-label">00</span>
+                                        <span class="hex-byte-label">01</span>
+                                        <span class="hex-byte-label">02</span>
+                                        <span class="hex-byte-label">03</span>
+                                        <span class="hex-byte-label">04</span>
+                                        <span class="hex-byte-label">05</span>
+                                        <span class="hex-byte-label">06</span>
+                                        <span class="hex-byte-label">07</span>
+                                        <span class="hex-byte-label">08</span>
+                                        <span class="hex-byte-label">09</span>
+                                        <span class="hex-byte-label">0A</span>
+                                        <span class="hex-byte-label">0B</span>
+                                        <span class="hex-byte-label">0C</span>
+                                        <span class="hex-byte-label">0D</span>
+                                        <span class="hex-byte-label">0E</span>
+                                        <span class="hex-byte-label">0F</span>
+                                    </div>
+                                    <div class="hex-ascii-header">ASCII</div>
+                                </div>
+                                <div class="hex-editor-body" id="edid-hex-display">
+                                    <!-- 由JavaScript动态生成 -->
+                                </div>
+                            </div>
+                            <textarea id="edid-hex" style="display: none;"></textarea>
+                        </div>
+                        <!-- 右侧控制面板 -->
+                        <div class="edid-sidebar">
+                            <div class="edid-help panel-dark">
+                                <div class="edid-help-title">编辑说明</div>
+                                <div class="edid-description">
+                                    请输入512个十六进制字符 (0-9, a-f)，点击字节可编辑，非十六进制字符会自动过滤。</li>
+                                </div>
+                                <div class="edid-quick-actions">
+                                    <button class="btn-base btn-compact btn-tonal"
+                                        onclick="copyEdidHex()">复制HEX</button>
+                                    <button class="btn-base btn-compact btn-tonal"
+                                        onclick="pasteEdidHex()">粘贴HEX</button>
+                                    <button class="btn-base btn-compact btn-tonal is-warning"
+                                        onclick="clearEdidHex()">清空</button>
+                                </div>
+                            </div>
+                            <div class="edid-info-panel panel-dark">
+                                <div class="edid-info-item">
+                                    <label>状态</label>
+                                    <div class="edid-status" id="edid-status">
+                                        <span class="status-dot"></span>
+                                        <span>未加载</span>
+                                    </div>
+                                </div>
+                                <div class="edid-info-item">
+                                    <label>字节</label>
+                                    <div class="edid-counter">
+                                        <span id="edid-byte-count">0</span> / 256
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="edid-actions panel-dark">
+                                <input type="file" id="edid-file-input" accept=".bin,.edid" style="display: none;"
+                                    onchange="loadEdidFromFile(this)">
+                                <button class="btn-base btn-inline btn-tonal"
+                                    onclick="document.getElementById('edid-file-input').click()">
+                                    <span>📁</span>
+                                    <span>打开EDID</span>
+                                </button>
+                                <button class="btn-base btn-inline btn-tonal" onclick="downloadEdidFile()">
+                                    <span>💾</span>
+                                    <span>下载EDID</span>
+                                </button>
+                                <button class="btn-base btn-inline btn-tonal is-warning" onclick="resetEdidToDefault()">
+                                    <span>⚠️</span>
+                                    <span>恢复默认</span>
+                                </button>
+                                <button class="btn-base btn-inline btn-tonal is-primary" onclick="applyEdidConfig()">
+                                    <span>✅</span>
+                                    <span>保存并应用</span>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- RK628 快捷工作台 -->
+            <div class="input-tab-content" id="tab-edid-quick">
+                <div class="page-content rk628-quick-page">
+                    <div class="display-config-section rk628-quick-layout">
+                        <div class="rk628-quick-subcontent active" id="rk628-quick-view-modes">
+                            <div class="config-group rk628-quick-library">
+                                <div class="rk628-quick-workbench rk628-quick-modes-workbench">
+                                    <div class="rk628-quick-main">
+                                        <div class="rk628-quick-editor-panel">
+                                            <div class="rk628-quick-editor-head">
+                                                <div class="rk628-quick-panel-title" id="rk628-quick-editor-title">添加模式</div>
+                                                <div class="rk628-quick-editor-head-actions">
+                                                    <button class="btn-base btn-inline btn-tonal" id="rk628-quick-editor-reset" onclick="rk628QuickResetCustomForm()">
+                                                        <span>↺</span><span>新建</span>
+                                                    </button>
+                                                    <button class="btn-base btn-inline btn-tonal is-primary" id="rk628-quick-editor-save" onclick="rk628QuickSaveCustomMode()">
+                                                        <span>＋</span><span>添加</span>
+                                                    </button>
+                                                </div>
+                                            </div>
+
+                                            <div class="rk628-quick-create-basic">
+                                                <div class="config-field">
+                                                    <label>模式名称</label>
+                                                    <input type="text" id="rk628-quick-custom-name" value="custom" oninput="rk628QuickRefreshCustomDraft()">
+                                                </div>
+                                                <div class="config-field select-wrapper">
+                                                    <label>常用预设</label>
+                                                    <select class="select-base" id="rk628-quick-preset-select" onchange="rk628QuickApplySelectedPreset()">
+                                                        <option value="">选择常用预设</option>
+                                                        <option value="1080x1920p60" selected>1080x1920@60</option>
+                                                        <option value="640x480p60">640x480@60</option>
+                                                        <option value="800x600p60">800x600@60</option>
+                                                        <option value="1024x768p60">1024x768@60</option>
+                                                        <option value="1280x720p60">1280x720@60</option>
+                                                        <option value="1920x1080p60">1920x1080@60</option>
+                                                    </select>
+                                                </div>
+                                                <div class="config-field">
+                                                    <label>宽度</label>
+                                                    <input type="number" id="rk628-quick-custom-hdisplay" value="1080" min="1" step="1" oninput="rk628QuickRefreshCustomDraft()">
+                                                </div>
+                                                <div class="config-field">
+                                                    <label>高度</label>
+                                                    <input type="number" id="rk628-quick-custom-vdisplay" value="1920" min="1" step="1" oninput="rk628QuickRefreshCustomDraft()">
+                                                </div>
+                                                <div class="config-field">
+                                                    <label>刷新率</label>
+                                                    <input type="number" id="rk628-quick-custom-fps" value="60" min="1" step="1" oninput="rk628QuickRefreshCustomDraft()">
+                                                </div>
+                                            </div>
+
+                                            <div class="rk628-quick-create-timings">
+                                                <div class="rk628-quick-create-band rk628-quick-create-band-h">
+                                                    <div class="rk628-quick-band-title">水平时序</div>
+                                                    <div class="rk628-quick-create-triple">
+                                                        <div class="config-field rk628-quick-tight-field">
+                                                            <label>前肩</label>
+                                                            <input type="number" id="rk628-quick-custom-hfront" value="80" min="0" step="1" oninput="rk628QuickRefreshCustomDraft()">
+                                                        </div>
+                                                        <div class="config-field rk628-quick-tight-field">
+                                                            <label>同步</label>
+                                                            <input type="number" id="rk628-quick-custom-hsync" value="20" min="0" step="1" oninput="rk628QuickRefreshCustomDraft()">
+                                                        </div>
+                                                        <div class="config-field rk628-quick-tight-field">
+                                                            <label>后肩</label>
+                                                            <input type="number" id="rk628-quick-custom-hback" value="80" min="0" step="1" oninput="rk628QuickRefreshCustomDraft()">
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                <div class="rk628-quick-create-band rk628-quick-create-band-v">
+                                                    <div class="rk628-quick-band-title">垂直时序</div>
+                                                    <div class="rk628-quick-create-triple">
+                                                        <div class="config-field rk628-quick-tight-field">
+                                                            <label>前肩</label>
+                                                            <input type="number" id="rk628-quick-custom-vfront" value="20" min="0" step="1" oninput="rk628QuickRefreshCustomDraft()">
+                                                        </div>
+                                                        <div class="config-field rk628-quick-tight-field">
+                                                            <label>同步</label>
+                                                            <input type="number" id="rk628-quick-custom-vsync" value="10" min="0" step="1" oninput="rk628QuickRefreshCustomDraft()">
+                                                        </div>
+                                                        <div class="config-field rk628-quick-tight-field">
+                                                            <label>后肩</label>
+                                                            <input type="number" id="rk628-quick-custom-vback" value="20" min="0" step="1" oninput="rk628QuickRefreshCustomDraft()">
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            <div class="rk628-mode-metrics rk628-quick-draft-metrics">
+                                                <span class="rk628-mode-chip" id="rk628-quick-draft-htotal">HT 0</span>
+                                                <span class="rk628-mode-chip" id="rk628-quick-draft-vtotal">VT 0</span>
+                                                <span class="rk628-mode-chip" id="rk628-quick-draft-clock">Clock 0kHz</span>
+                                                <span class="rk628-mode-chip" id="rk628-quick-draft-actual">Actual 0Hz</span>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div class="rk628-quick-sidebar rk628-quick-modes-sidebar">
+                                        <div class="rk628-quick-list-panel rk628-quick-list-panel-side">
+                                            <div class="rk628-quick-list-head">
+                                                <div class="rk628-quick-panel-title" id="rk628-quick-list-summary">模式列表（0个模式）</div>
+                                            </div>
+                                            <div id="rk628-quick-modes" class="rk628-modes-list"></div>
+                                        </div>
+
+                                        <div class="rk628-quick-side-card edid-actions rk628-quick-side-actions rk628-quick-mode-action-panel">
+                                            <button class="btn-base btn-inline btn-tonal" onclick="rk628QuickFlashEdid()">
+                                                <span>💾</span><span>刷入EDID</span>
+                                            </button>
+                                            <button class="btn-base btn-inline btn-tonal" onclick="rk628QuickViewEdid()">
+                                                <span>👁️</span><span>查看EDID</span>
+                                            </button>
+                                            <button class="btn-base btn-inline btn-tonal is-primary rk628-quick-cta" onclick="rk628QuickHardRestart()">
+                                                <span>⚡</span><span>硬重启</span>
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="rk628-quick-subcontent" id="rk628-quick-view-tuning">
+                            <div class="config-group rk628-quick-adv-col">
+                                <div class="rk628-tuning-grid">
+                                    <div class="rk628-tuning-card rk628-tuning-flags">
+                                        <label>调试FLAGS</label>
+                                        <div class="rk628-pp-grid rk628-quick-block-gap-sm">
+                                            <label class="flag-checkbox rk628-quick-flag"><input type="checkbox" id="rk628-pp-cap-psync"><span>CAP_PSYNC</span></label>
+                                            <label class="flag-checkbox rk628-quick-flag"><input type="checkbox" id="rk628-pp-cap-async" checked><span>CAP_ASYNC</span></label>
+                                            <label class="flag-checkbox rk628-quick-flag"><input type="checkbox" id="rk628-pp-progress" checked><span>PROGRESS</span></label>
+                                            <label class="flag-checkbox rk628-quick-flag"><input type="checkbox" id="rk628-pp-keep-aspect"><span>等比缩放</span></label>
+                                            <label class="flag-checkbox rk628-quick-flag"><input type="checkbox" id="rk628-pp-dst-clock-follow"><span>输出时钟跟随</span></label>
+                                            <label class="flag-checkbox rk628-quick-flag"><input type="checkbox" id="rk628-pp-power-cycle"><span>掉电</span></label>
+                                            <label class="flag-checkbox rk628-quick-flag"><input type="checkbox" id="rk628-pp-force-hpol" checked><span>强制HS</span></label>
+                                            <label class="flag-checkbox rk628-quick-flag"><input type="checkbox" id="rk628-pp-hpol" checked><span>HS=1</span></label>
+                                            <label class="flag-checkbox rk628-quick-flag"><input type="checkbox" id="rk628-pp-force-vpol" checked><span>强制VS</span></label>
+                                            <label class="flag-checkbox rk628-quick-flag"><input type="checkbox" id="rk628-pp-vpol" checked><span>VS=1</span></label>
+                                        </div>
+
+                                        <div class="rk628-tuning-inline-debug">
+                                            <label>调试输出</label>
+                                            <textarea class="textarea-base rk628-quick-debug-output" id="rk628-pp-debug" rows="4" readonly placeholder="这里会显示读取结果/寄存器快照"></textarea>
+                                        </div>
+                                    </div>
+
+                                    <div class="rk628-tuning-sidebar">
+                                        <div class="rk628-tuning-card rk628-tuning-frame">
+                                            <label>Frame</label>
+                                            <div class="rk628-pp-frame rk628-quick-block-gap-sm">
+                                                <label class="flag-checkbox rk628-quick-flag"><input type="radio" name="rk628PpDspFrameMode" id="rk628-pp-dsp-fixed" checked><span>FRAME固定</span></label>
+                                                <label class="flag-checkbox rk628-quick-flag"><input type="radio" name="rk628PpDspFrameMode" id="rk628-pp-dsp-auto"><span>FRAME自动</span></label>
+                                                <div class="config-field rk628-quick-tight-field">
+                                                    <span class="field-hint rk628-quick-inline-label">HST</span>
+                                                    <input type="number" id="rk628-pp-dsp-hst" value="0" min="0" step="1">
+
+                                                    <span class="field-hint rk628-quick-inline-label">VST</span>
+                                                    <input type="number" id="rk628-pp-dsp-vst" value="4" min="0" step="1">
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <div class="rk628-tuning-card rk628-tuning-actions-card">
+                                            <label>操作</label>
+                                            <div class="rk628-quick-primary-actions rk628-quick-block-gap-sm">
+                                                <button class="btn-base btn-inline btn-tonal" onclick="rk628QuickPpLoad()"><span>读取</span></button>
+                                                <button class="btn-base btn-inline btn-tonal" onclick="rk628QuickPpApply()"><span>应用</span></button>
+                                                <button class="btn-base btn-inline btn-tonal" onclick="rk628QuickPpPreset('psyncOnly')"><span>PSYNC</span></button>
+                                                <button class="btn-base btn-inline btn-tonal" onclick="rk628QuickPpPreset('autoFrame')"><span>Auto</span></button>
+                                                <button class="btn-base btn-inline btn-tonal" onclick="rk628QuickPpPreset('noForcePol')"><span>Polarity</span></button>
+                                                <button class="btn-base btn-inline btn-tonal rk628-quick-action-span" onclick="rk628QuickPpDumpRegs()"><span>快照</span></button>
+                                                <button class="btn-base btn-inline btn-tonal is-warning" onclick="rk628QuickPpBaseline()"><span>恢复默认</span></button>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="input-tab-content" id="tab-debug-log">
+                <div class="page-content">
+                    <div class="info-card panel-dark rk628-debug-log-card">
+                        <div class="settings-section-header">
+                            <h3>🧾 调试日志</h3>
+                            <div style="display:flex; gap:8px;">
+                                <button class="btn-base btn-compact btn-tonal" onclick="rk628ClearDebugLog()">清空显示</button>
+                            </div>
+                        </div>
+                        <div id="rk628-debug-log" class="log-terminal rk628-debug-log-terminal"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- AI 页面 -->
+    <div class="detail-page glass-xl-md no-dock" id="page-ai">
+        <div class="page-header ai-header">
+            <button class="btn-base btn-glass btn-inline" onclick="closePage()">← 返回</button>
+            <h2 class="page-title">AI</h2>
+            <div class="ai-status">
+                <span class="ai-status-item" id="aiConnectionText">未连接</span>
+                <span class="ai-status-item" id="aiVersionText"></span>
+            </div>
+        </div>
+
+        <div class="page-content ai2-page">
+            <div class="ai2-chat-wrap panel-dark">
+                <div class="ai2-busy" id="ai2Busy" style="display:none;">
+                    <div class="spinner" style="width:20px; height:20px;"></div>
+                    <span id="ai2BusyText">正在初始化 AI...</span>
+                </div>
+
+                <div class="ai2-chat-grid">
+                    <div class="ai2-messages" id="ai2Messages"></div>
+                    <div class="ai2-details" id="ai2Details">
+                        <div class="ai2-empty">点击一条消息查看步骤与工具详情</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="ai2-composer panel-dark">
+                <div class="ai2-prompt-dock" id="ai2PromptDock" style="display:none;"></div>
+
+                <div class="ai2-attachments" id="ai2Attachments" style="display:none;">
+                    <div class="ai2-attachments-list" id="ai2AttachmentList"></div>
+                </div>
+
+                <textarea class="textarea-base ai2-input" id="aiPrompt" rows="3" placeholder="输入你的问题..."></textarea>
+
+                <div class="ai2-controls">
+                    <div class="ai2-mode-toggle" aria-label="AI 模式">
+                        <button class="btn-base btn-tab" id="aiModePlanBtn" onclick="setAiMode('plan')">plan</button>
+                        <button class="btn-base btn-tab" id="aiModeBuildBtn" onclick="setAiMode('build')">build</button>
+                    </div>
+
+                    <button class="ai2-model-trigger" id="aiModelTrigger" type="button" onclick="aiOpenModelSelector()">
+                        <div class="ai2-model-trigger-icon" id="aiModelTriggerIcon">●</div>
+                        <div class="ai2-model-trigger-text">
+                            <div class="ai2-model-trigger-main" id="aiModelTriggerMain">选择模型</div>
+                            <div class="ai2-model-trigger-sub" id="aiModelTriggerSub"></div>
+                        </div>
+                        <div class="ai2-model-trigger-caret">▾</div>
+                    </button>
+
+                    <button class="btn-base ai2-icon-btn" id="aiAttachBtn" type="button" onclick="aiPickAttachment()"
+                        aria-label="添加附件">📎</button>
+                    <button class="btn-base ai2-icon-btn ai2-send" id="aiSendBtn" type="button" onclick="aiSend()"
+                        aria-label="发送">➤</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <!-- 关于页面 -->
+    <div class="detail-page glass-xl-md" id="page-about">
+        <div class="page-header">
+            <button class="btn-base btn-glass btn-inline" onclick="closePage()">← 返回</button>
+            <h2 class="page-title">关于</h2>
+        </div>
+        <div class="page-content">
+            <div class="about-page-container">
+                <div class="about-logo-section">
+                    <div class="about-icon-large">📱</div>
+                    <div class="about-title-large">Smart Touch Panel</div>
+                    <div class="about-version-large">版本 v1.0.0</div>
+                    <div class="about-description">
+                        智能触控屏控制系统，为您的设备提供强大的触控交互体验
+                    </div>
+                </div>
+                <div class="about-info-grid">
+                    <div class="about-info-card">
+                        <div class="about-card-header">
+                            <div class="icon-md">🔧</div>
+                            <div class="text-strong">硬件平台</div>
+                        </div>
+                        <div class="about-card-content">
+                            <div class="info-row">
+                                <span class="about-info-label">芯片平台</span>
+                                <span class="about-info-value">JL AC7916</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="about-info-label">显示芯片</span>
+                                <span class="about-info-value">RK628</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="about-info-label">分辨率</span>
+                                <span class="about-info-value">1080x1920</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="about-info-card">
+                        <div class="about-card-header">
+                            <div class="icon-md">💻</div>
+                            <div class="text-strong">技术栈</div>
+                        </div>
+                        <div class="about-card-content">
+                            <div class="info-row">
+                                <span class="about-info-label">前端</span>
+                                <span class="about-info-value">HTML5 + JavaScript</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="about-info-label">后端</span>
+                                <span class="about-info-value">C# MAUI/WPF</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="about-info-label">脚本引擎</span>
+                                <span class="about-info-value">Lua (Fengari)</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="about-info-label">HID通信</span>
+                                <span class="about-info-value">USB HID Protocol</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="about-info-card about-features-card">
+                        <div class="about-card-header">
+                            <div class="icon-md">✨</div>
+                            <div class="text-strong">核心功能</div>
+                        </div>
+                        <div class="about-card-content">
+                            <div class="about-feature-item">✓ 多点触控虚拟键盘</div>
+                            <div class="about-feature-item">✓ 实时系统性能监控</div>
+                            <div class="about-feature-item">✓ WiFi/蓝牙连接管理</div>
+                            <div class="about-feature-item">✓ 安全OTA固件更新</div>
+                            <div class="about-feature-item">✓ 自定义快捷键与Emoji</div>
+                            <div class="about-feature-item">✓ 浏览器控制与缩放</div>
+                            <div class="about-feature-item">✓ 倒计时与便签管理</div>
+                            <div class="about-feature-item">✓ 音乐播放控制</div>
+                        </div>
+                    </div>
+                    <div class="about-info-card">
+                        <div class="about-card-header">
+                            <div class="icon-md">🌐</div>
+                            <div class="text-strong">开源组件</div>
+                        </div>
+                        <div class="about-card-content">
+                            <a class="about-feature-item" href="https://github.com/Mbed-TLS/mbedtls" target="_blank"
+                                rel="noreferrer noopener">Mbed TLS — 加密与 TLS</a>
+                            <a class="about-feature-item" href="https://github.com/DaveGamble/cJSON" target="_blank"
+                                rel="noreferrer noopener">cJSON — 轻量 JSON 解析</a>
+                            <a class="about-feature-item" href="https://github.com/lwip-tcpip/lwip" target="_blank"
+                                rel="noreferrer noopener">lwIP — 轻量 TCP/IP 协议栈</a>
+                            <a class="about-feature-item" href="https://github.com/ARMmbed/mbed-os-tinycbor"
+                                target="_blank" rel="noreferrer noopener">TinyCBOR — CBOR 解析</a>
+                            <a class="about-feature-item" href="https://github.com/armink/FlashDB" target="_blank"
+                                rel="noreferrer noopener">FlashDB — 嵌入式 KV/TSDB</a>
+                            <a class="about-feature-item" href="https://w1.fi/wpa_supplicant/" target="_blank"
+                                rel="noreferrer noopener">wpa_supplicant/hostapd — Wi‑Fi 协议栈</a>
+                            <a class="about-feature-item" href="https://github.com/naudio/NAudio" target="_blank"
+                                rel="noreferrer noopener">NAudio — Windows 音频处理</a>
+                            <a class="about-feature-item" href="https://github.com/statianzo/Fleck" target="_blank"
+                                rel="noreferrer noopener">Fleck — .NET WebSocket 服务器</a>
+                        </div>
+
+                    </div>
+                    <div class="about-info-card">
+                        <div class="about-card-header">
+                            <div class="icon-md">🔐</div>
+                            <div class="text-strong">安全特性</div>
+                        </div>
+                        <div class="about-card-content">
+                            <div class="about-feature-item">✓ HMAC-SHA256 设备认证</div>
+                            <div class="about-feature-item">✓ AES-128-CTR 固件加密</div>
+                            <div class="about-feature-item">✓ SHA256 完整性校验</div>
+                            <div class="about-feature-item">✓ 安全启动保护</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="about-footer-section">
+                    <div class="about-copyright">
+                        Copyright © 2025-2026 Smart Touch Bar
+                    </div>
+                    <div class="about-build-info">
+                        Build: <span id="buildDate">2026.01.01</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <!-- 通用弹窗 -->
+    <div class="modal glass-sm" id="modal">
+        <div class="modal-content glass-lg">
+            <div class="modal-header">
+                <h3 id="modalTitle">提示</h3>
+                <button class="modal-close" id="modalClose">✕</button>
+            </div>
+            <div class="modal-body" id="modalBody"></div>
+            <div class="modal-footer">
+                <button class="btn-base btn-secondary" id="modalCancel">取消</button>
+                <button class="btn-base btn-primary" id="modalConfirm">确定</button>
+            </div>
+        </div>
+    </div>
+    <!-- 固件烧录日志弹窗 -->
+    <div class="modal glass-sm" id="updateLogModal">
+        <div class="modal-content modal-lg glass-lg">
+            <div class="modal-header">
+                <h3>📋 固件烧录日志</h3>
+                <button class="modal-close" onclick="closeUpdateLogModal()">✕</button>
+            </div>
+            <div class="modal-body" style="background: #0d0d0f; padding: 0;">
+                <div class="log-terminal" id="manualUpdateLogContent"></div>
+            </div>
+            <div class="modal-footer" style="justify-content: space-between;">
+                <span class="update-log-status" id="updateLogStatus">等待开始...</span>
+                <div style="display: flex; gap: 12px;">
+                    <button class="btn-base btn-secondary" onclick="copyUpdateLog()">复制日志</button>
+                    <button class="btn-base btn-primary" onclick="closeUpdateLogModal()" id="updateLogCloseBtn"
+                        disabled>关闭</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <!-- Toast通知 -->
+    <div class="toast" id="toast"></div>
+    <script>
+        window.module = { exports: {} };
+        window.exports = window.module.exports;
+    </script>
+    <script src="fengari-web.bundle.js"></script>
+    <script>
+        window.Fengari = window.module.exports;
+    </script>
+    <script src="ui_components.js"></script>
+    <script src="ui_phone.js"></script>
+    <script src="ui_shortcuts.js"></script>
+    <script src="ui_apps.js"></script>
+    <script src="ui_misc.js"></script>
+    <script src="script.js"></script>
+</body>
+
+</html>

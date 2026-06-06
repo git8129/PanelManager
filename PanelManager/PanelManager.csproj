@@ -1,0 +1,104 @@
+<Project Sdk="Microsoft.NET.Sdk.Razor">
+
+    <PropertyGroup>
+        <TargetFrameworks>net9.0-windows10.0.19041.0</TargetFrameworks>
+
+        <OutputType>Exe</OutputType>
+        <RootNamespace>PanelManager</RootNamespace>
+        <UseMaui>true</UseMaui>
+        <SingleProject>true</SingleProject>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <EnableDefaultCssItems>false</EnableDefaultCssItems>
+        <Nullable>enable</Nullable>
+
+        <ApplicationTitle>PanelManager</ApplicationTitle>
+        <ApplicationId>com.companyname.panelmanager</ApplicationId>
+        <ApplicationDisplayVersion>1.0</ApplicationDisplayVersion>
+        <ApplicationVersion>1</ApplicationVersion>
+
+        <WindowsPackageType>None</WindowsPackageType>
+        <ApplicationIcon>Resources\AppIcon\appicon.ico</ApplicationIcon>
+        <SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'windows'">10.0.17763.0</SupportedOSPlatformVersion>
+        <TargetPlatformMinVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'windows'">10.0.17763.0</TargetPlatformMinVersion>
+        <DefaultLanguage>zh-cn</DefaultLanguage>
+        <AppxPackageSigningEnabled>False</AppxPackageSigningEnabled>
+
+        <!-- Entry point for WinUI is generated from Platforms/Windows/App.xaml; do not set StartupObject. -->
+    </PropertyGroup>
+
+    <ItemGroup>
+        <MauiSplashScreen Include="Resources\Splash\splash.svg" Color="#512BD4" BaseSize="128,128" />
+        <MauiImage Include="Resources\Images\*" />
+        <MauiImage Update="Resources\Images\dotnet_bot.svg" BaseSize="168,208" />
+        <MauiFont Include="Resources\Fonts\*" />
+        <MauiAsset Include="Resources\Raw\**" LogicalName="%(RecursiveDir)%(Filename)%(Extension)" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <Content Include="Tools\**">
+            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        </Content>
+    </ItemGroup>
+
+    <ItemGroup>
+      <Compile Remove="FloatingWindow\**" />
+      <Content Remove="FloatingWindow\**" />
+      <EmbeddedResource Remove="FloatingWindow\**" />
+      <MauiXaml Remove="FloatingWindow\**" />
+      <None Remove="FloatingWindow\**" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <PackageReference Include="Fleck" Version="1.2.0" />
+        <PackageReference Include="Microsoft.Maui.Controls" Version="$(MauiVersion)" />
+        <PackageReference Include="Microsoft.AspNetCore.Components.WebView.Maui" Version="$(MauiVersion)" />
+        <PackageReference Include="Microsoft.Extensions.Logging.Debug" Version="9.0.5" />
+        <PackageReference Include="NAudio" Version="2.2.1" />
+        <PackageReference Include="System.Diagnostics.PerformanceCounter" Version="10.0.0" />
+        <PackageReference Include="System.IO.Ports" Version="10.0.0" />
+        <PackageReference Include="System.Drawing.Common" Version="9.0.0" />
+    </ItemGroup>
+
+    <PropertyGroup>
+        <IsWindowsTarget>$([System.String]::Copy('$(TargetFramework)').Contains('windows'))</IsWindowsTarget>
+        <FloatingWindowProject>$(MSBuildThisFileDirectory)..\FloatingWindow\FloatingWindow.csproj</FloatingWindowProject>
+        <FloatingWindowOutputDir>$(MSBuildThisFileDirectory)..\FloatingWindow\bin\$(Configuration)\</FloatingWindowOutputDir>
+        <SatelliteResourceLanguages>zh-CN;en-US</SatelliteResourceLanguages>
+        <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+        <IncludeAllContentForSelfExtract>false</IncludeAllContentForSelfExtract>
+        <DisableBuildCompression>true</DisableBuildCompression>
+    </PropertyGroup>
+
+    <Target Name="BuildFloatingWindow" BeforeTargets="Build" Condition="'$(IsWindowsTarget)' == 'True' AND Exists('$(FloatingWindowProject)')">
+        <Message Text="Building FloatingWindow..." Importance="high" />
+        <Exec Command="dotnet build &quot;$(FloatingWindowProject)&quot; -c $(Configuration) --no-restore" WorkingDirectory="$(MSBuildThisFileDirectory).." ContinueOnError="false" />
+    </Target>
+
+    <Target Name="CopyFloatingWindow" AfterTargets="Build" Condition="'$(IsWindowsTarget)' == 'True' AND Exists('$(FloatingWindowProject)')">
+        <ItemGroup>
+            <FloatingWindowFiles Include="$(FloatingWindowOutputDir)**\*.*" />
+        </ItemGroup>
+        <Copy SourceFiles="@(FloatingWindowFiles)" DestinationFolder="$(OutputPath)%(RecursiveDir)" SkipUnchangedFiles="true" />
+        <Message Text="Copied FloatingWindow to $(OutputPath)" Importance="high" />
+    </Target>
+
+    <Target Name="CopyFloatingWindowOnPublish" AfterTargets="Publish" Condition="'$(IsWindowsTarget)' == 'True' AND Exists('$(FloatingWindowProject)')">
+        <ItemGroup>
+            <FloatingWindowFilesPublish Include="$(FloatingWindowOutputDir)**\*.*" />
+        </ItemGroup>
+        <Copy SourceFiles="@(FloatingWindowFilesPublish)" DestinationFolder="$(PublishDir)%(RecursiveDir)" SkipUnchangedFiles="true" />
+        <Message Text="Copied FloatingWindow to $(PublishDir)" Importance="high" />
+    </Target>
+
+    <PropertyGroup>
+        <GenerateSourceArchive Condition="'$(GenerateSourceArchive)'=='' AND '$(Configuration)'=='Release'">true</GenerateSourceArchive>
+        <SourceArchiveName>PanelManager-source-$(ApplicationDisplayVersion).zip</SourceArchiveName>
+        <SourceArchivePath>$([System.IO.Path]::Combine('$(PublishDir)', '$(SourceArchiveName)'))</SourceArchivePath>
+    </PropertyGroup>
+
+    <Target Name="GenerateSourceArchive" AfterTargets="Publish" Condition="'$(IsWindowsTarget)' == 'True' AND '$(GenerateSourceArchive)' == 'true'">
+        <Message Text="Generating source archive: $(SourceArchivePath)" Importance="high" />
+        <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)..\scripts\create-source-archive.ps1&quot; -Root &quot;$(MSBuildThisFileDirectory)..&quot; -Destination &quot;$(SourceArchivePath)&quot;" />
+    </Target>
+
+</Project>
