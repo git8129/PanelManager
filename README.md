@@ -6,6 +6,12 @@ PanelManager 是一个基于 .NET MAUI + BlazorWebView 的桌面副屏控制面�
 
 当前项目主要是上位机部分实现，硬件部分请移步至 [立创开源广场](https://oshwhub.com/5473675a/project_rnkdtbtx)。
 
+## 最新开发进展
+
+- 稳定性更新已覆盖 PanelLink 复合 USB PID `5F55` 识别、WiFi/蓝牙开关防重复触发与传输错误处理、显示缩放持久化，以及串口认证、worker/WebSocket 恢复等链路。
+- 固件更新支持自包含 `.pmfw` 文件的检查、计划、下载、校验和设备重连。
+- RK628 显示配置界面已精简，并针对触控屏放大文字和操作区域。
+
 ## 主要能力
 
 - 设备连接与状态监控（串口、系统状态）
@@ -13,6 +19,12 @@ PanelManager 是一个基于 .NET MAUI + BlazorWebView 的桌面副屏控制面�
 - 工具页与配置页（包含 EDID、快捷控制、便签等界面能力）
 - AI 助手页（模型选择、会话、步骤/工具详情、Provider 配置）
 - Windows 悬浮窗协同（`FloatingWindow` 子工程）
+
+## 上下位机边界
+
+- 本仓库是桌面上位机。WiFi、蓝牙、音频、RK628、USB/HID 等页面主要负责向下位机发送协议命令并展示结果。
+- 当前网络唤醒由配套下位机提供内置 HTTP 页面和 API，并由下位机 WiFi 直接发送 WOL Magic Packet；桌面端没有 WOL UI、协议命令或 UDP 发包实现。
+- 贡献和自动化开发规范记录在仓库 `AGENTS.md`。
 
 ## 技术栈
 
@@ -24,6 +36,7 @@ PanelManager 是一个基于 .NET MAUI + BlazorWebView 的桌面副屏控制面�
 ## 仓库结构
 
 - `PanelManager/`：主应用（MAUI + BlazorWebView）
+- `PanelManager/Dependencies/Isd/IsdDownload.dll`：预编译 x64 原生 PMFW 验签与下载边界，SHA-256 为 `08126B1CB737E3BB7CA64177DF333032B7AB8918B2A7F405D548F7358B72929C`
 - `FloatingWindow/`：Windows 悬浮窗子项目（WPF）
 - `skills/panelmanager-opencode/SKILL.md`：OpenCode 本地工程技能（主规则入口）
 - `AGENTS.md`：仓库智能体手册，也是源码包工作区的通用规则入口
@@ -91,7 +104,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\publish-windows-cli.ps1
 ## 常见问题
 
 - `NETSDK1045`：当前 SDK 版本过低，请安装 .NET SDK 9.x。
-- `MSB3030` 且涉及 `MsixContent` / `Microsoft.UI.Xaml.Controls.pri`：先检查工作区里的 `PanelManager/Tools/` 与根目录 `skills/` 是否补齐。
+- `MSB3030` 且涉及 `MsixContent` / `Microsoft.UI.Xaml.Controls.pri`：检查工作区结构、MAUI workload 与 Windows App SDK 资源是否完整。
 - 构建成功但页面异常：优先检查 `PanelManager/wwwroot/script.js` 与 `style.css` 修改是否引入语法/布局问题。
 
 ## 开发建议

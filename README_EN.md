@@ -12,6 +12,12 @@ This repository primarily contains the host application. See the
 [OSHWHub project](https://oshwhub.com/5473675a/project_rnkdtbtx) for the
 hardware implementation.
 
+## Latest Development Update
+
+- Stability work covers composite PanelLink USB PID `5F55` detection, duplicate-event and transport-error handling for Wi-Fi/Bluetooth toggles, persistent display scaling, and serial authentication plus worker/WebSocket recovery paths.
+- Firmware updates support inspection, planning, download, verification, and device reconnection for self-contained `.pmfw` files.
+- The RK628 display workflow is simplified and its text and controls are sized for touch screens.
+
 ## Features
 
 - Device connection and status monitoring, including serial and system status
@@ -19,6 +25,12 @@ hardware implementation.
 - Utility and configuration pages for EDID, shortcuts, notes, and related tools
 - AI assistant with model selection, conversations, step and tool details, and provider configuration
 - Windows floating-window integration through the `FloatingWindow` project
+
+## Host And Device Boundary
+
+- This repository contains the desktop host. Its Wi-Fi, Bluetooth, audio, RK628, and USB/HID pages primarily send device protocol commands and display results.
+- Network wake is implemented by that companion firmware: the device serves its own HTTP UI and API, then sends WOL Magic Packets through device Wi-Fi. The desktop host has no WOL UI, protocol command, or UDP sender.
+- Contribution and coding-agent guidance is documented in `AGENTS.md`.
 
 ## Technology
 
@@ -29,7 +41,8 @@ hardware implementation.
 
 ## Repository Structure
 
-- `PanelManager/`: main MAUI and BlazorWebView application
+- `PanelManager/`: the .NET MAUI and BlazorWebView host application
+- `PanelManager/Dependencies/Isd/IsdDownload.dll`: precompiled x64 native PMFW verification and download boundary, SHA-256 `08126B1CB737E3BB7CA64177DF333032B7AB8918B2A7F405D548F7358B72929C`
 - `FloatingWindow/`: Windows floating-window companion application using WPF
 - `Installer/`: Windows installer project
 - `skills/panelmanager-opencode/SKILL.md`: local OpenCode project skill
@@ -77,7 +90,7 @@ The published directory contains:
 ## Build the Installer
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\package-windows-installer.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\package-windows-installer.ps1 -WatermarkText ""
 ```
 
 Default installer output:
@@ -115,8 +128,7 @@ Default installer output:
 
 - `NETSDK1045`: install or use .NET SDK 9.x.
 - `MSB3030` involving `MsixContent` or `Microsoft.UI.Xaml.Controls.pri`:
-  verify the workspace structure, MAUI workload, Windows App SDK resources,
-  and required contents under `PanelManager/Tools/`.
+  verify the workspace structure, MAUI workload, and Windows App SDK resources.
 - If the build succeeds but the page is broken, inspect recent changes in
   `PanelManager/wwwroot/script.js` and `style.css`.
 
