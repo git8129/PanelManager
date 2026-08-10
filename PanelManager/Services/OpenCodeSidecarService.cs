@@ -428,8 +428,6 @@ public sealed class OpenCodeSidecarService : IDisposable
             {
                 BroadcastProgress(new OpenCodeSidecarProgress("workspace", _selectedVersion, 10, null, null, "解压源码包...", null));
                 ExtractSourceArchiveBestEffort(archive, _workspaceSourceDir);
-                BroadcastProgress(new OpenCodeSidecarProgress("workspace", _selectedVersion, 14, null, null, "补齐运行时 Tools...", null));
-                CopyRuntimeToolsIntoWorkspace(appBase, _workspaceSourceDir);
                 _workspaceSourceOrigin = "archive";
             }
             catch
@@ -448,8 +446,6 @@ public sealed class OpenCodeSidecarService : IDisposable
                 _workspaceSourceOrigin = "repo";
                 BroadcastProgress(new OpenCodeSidecarProgress("workspace", _selectedVersion, 15, null, null, "复制源码到工作区...", null));
                 await CopyRepoToWorkspaceAsync(repoRoot, _workspaceSourceDir, ct).ConfigureAwait(false);
-                BroadcastProgress(new OpenCodeSidecarProgress("workspace", _selectedVersion, 18, null, null, "补齐运行时 Tools...", null));
-                CopyRuntimeToolsIntoWorkspace(appBase, _workspaceSourceDir);
             }
         }
 
@@ -537,22 +533,6 @@ public sealed class OpenCodeSidecarService : IDisposable
                 Directory.CreateDirectory(outDir);
             }
             entry.ExtractToFile(outPath, overwrite: true);
-        }
-    }
-
-    private static void CopyRuntimeToolsIntoWorkspace(string appBase, string destSrcDir)
-    {
-        try
-        {
-            var runtimeToolsDir = Path.Combine(appBase, "Tools");
-            if (!Directory.Exists(runtimeToolsDir)) return;
-
-            var workspaceToolsDir = Path.Combine(destSrcDir, "PanelManager", "Tools");
-            CopyDirectoryAll(runtimeToolsDir, workspaceToolsDir);
-        }
-        catch
-        {
-            // ignore
         }
     }
 

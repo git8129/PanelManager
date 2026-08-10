@@ -34,6 +34,8 @@ namespace PanelManager.Models
         App = 7,        // 应用管理
         Panel = 8,      // 面板控制 (亮度/背光)
         Update = 9,     // 系统更新 (OTA固件升级)
+        Rk628Debug = 10,// RK628低级调试
+        Audio = 11,     // UAC音频设置
     }
 
     /// <summary>
@@ -96,6 +98,10 @@ namespace PanelManager.Models
         /// </summary>
         [JsonPropertyName("data")]
         public JsonElement? Data { get; set; }
+
+        [JsonPropertyName("cap")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? HostCapability { get; set; }
 
         /// <summary>
         /// 状态码 (0=成功, 非0=错误码)

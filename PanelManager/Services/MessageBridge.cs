@@ -50,6 +50,8 @@ namespace PanelManager.Services
         private bool _deviceAuthenticated = false;
         private bool _authInProgress = false;
         private long _authStartedAtMs = 0;
+        private string? _authRequestId;
+        private long _serialOpenedAtMs = 0;
         private TaskCompletionSource<Message?>? _pendingChallenge;
         private TaskCompletionSource<Message?>? _pendingAuthentication;
         private System.Text.Json.JsonElement? _lastAuthChallengeData;
@@ -58,7 +60,9 @@ namespace PanelManager.Services
         private const string DeviceAuthHost = "PanelLinkHost";
         private const string DeviceAuthSecret = "PanelLinkAuth:v1";
         private const string DeviceUsbVid = "3654";
-        private static readonly string[] DeviceUsbPids = { "5B55", "4155" };
+        private static readonly string[] DeviceUsbPids = { "5B55", "4155", "5F55" };
+        private const int AuthenticationRequestTimeoutMs = 4000;
+        private const int UnauthenticatedSerialReconnectMs = 12000;
 
         public event Action<string>? OnLog;
         public event Action? OnWebSocketClientConnected;
@@ -81,11 +85,20 @@ namespace PanelManager.Services
 
                 try
                 {
-                    _wsServer = new WebSocketServer($"ws://0.0.0.0:{port}");
+                    _wsServer = new WebSocketServer($"ws://127.0.0.1:{port}");
                     _wsServer.Start(socket =>
                     {
                         socket.OnOpen = () =>
                         {
+                            if (!string.Equals(
+                                    socket.ConnectionInfo.Origin?.TrimEnd('/'),
+                                    "https://0.0.0.1",
+                                    StringComparison.OrdinalIgnoreCase))
+                            {
+                                Log($"[WS] 拒绝非受信源: {socket.ConnectionInfo.Origin ?? "<none>"}");
+                                socket.Close(1008);
+                                return;
+                            }
                             _webClients.Add(socket);
                             Log($"[WS] 客户端连接: {socket.ConnectionInfo.ClientIpAddress}");
 
@@ -107,7 +120,7 @@ namespace PanelManager.Services
                         socket.OnMessage = async msg => await HandleWebMessage(socket, msg);
                     });
 
-                    Log($"[WS] 服务器已启动: ws://0.0.0.0:{port}");
+                    Log($"[WS] 服务器已启动: ws://127.0.0.1:{port}");
                 }
                 catch (Exception ex)
                 {
@@ -158,6 +171,7 @@ namespace PanelManager.Services
                 _serialPort.DiscardOutBuffer();
                 _serialBuffer = string.Empty;
                 _serialTxQueue.Clear();
+                _serialOpenedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 _serialWorkerCts = new CancellationTokenSource();
                 _serialWorkerTask = Task.Run(() => SerialWorkerLoop(_serialWorkerCts.Token));
 
@@ -201,6 +215,8 @@ namespace PanelManager.Services
                 _deviceAuthenticated = false;
                 _authInProgress = false;
                 _authStartedAtMs = 0;
+                _authRequestId = null;
+                _serialOpenedAtMs = 0;
                 _pendingChallenge?.TrySetResult(null);
                 _pendingChallenge = null;
                 _pendingAuthentication?.TrySetResult(null);
@@ -229,6 +245,12 @@ namespace PanelManager.Services
 
         public void StartAutoReconnect()
         {
+            if (IsSerialOpen && !_deviceAuthenticated && !_authInProgress)
+            {
+                Log($"[Serial] 关闭未认证的旧连接: {CurrentPort}");
+                CloseSerial();
+            }
+
             if (_autoReconnectEnabled) return;
             
             _autoReconnectEnabled = true;
@@ -317,6 +339,33 @@ namespace PanelManager.Services
 
             try
             {
+                if ((_serialPort?.IsOpen ?? false) &&
+                    (_serialWorkerTask == null || _serialWorkerTask.IsCompleted))
+                {
+                    Log($"[Serial] 工作线程已停止，重新连接: {CurrentPort}");
+                    CloseSerial();
+                }
+
+                if (IsSerialOpen && !_deviceAuthenticated)
+                {
+                    var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    if (_authInProgress &&
+                        (_authStartedAtMs <= 0 || now - _authStartedAtMs >= AuthenticationRequestTimeoutMs))
+                    {
+                        Log($"[Serial] 认证请求超时: {CurrentPort}");
+                        _authInProgress = false;
+                        _authStartedAtMs = 0;
+                        _authRequestId = null;
+                        _pendingAuthentication?.TrySetResult(null);
+                    }
+
+                    if (_serialOpenedAtMs <= 0 || now - _serialOpenedAtMs >= UnauthenticatedSerialReconnectMs)
+                    {
+                        Log($"[Serial] 未认证超时，重新连接: {CurrentPort}");
+                        CloseSerial();
+                    }
+                }
+
                 // 情况1：串口应该打开但目前关闭了
                 if (IsSerialOpen && (!_serialPort?.IsOpen ?? true))
                 {
@@ -518,6 +567,8 @@ namespace PanelManager.Services
             };
 
             _authInProgress = true;
+            _authStartedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            _authRequestId = auth.Id;
             try
             {
                 var response = await SendToDeviceAndWaitAsync(auth, 3000);
@@ -528,6 +579,8 @@ namespace PanelManager.Services
             finally
             {
                 _authInProgress = false;
+                _authStartedAtMs = 0;
+                _authRequestId = null;
             }
         }
 
@@ -583,10 +636,12 @@ namespace PanelManager.Services
 
             _authInProgress = true;
             _authStartedAtMs = now;
+            _authRequestId = auth.Id;
             if (!SendToDeviceInternal(auth.ToJson()))
             {
                 _authInProgress = false;
                 _authStartedAtMs = 0;
+                _authRequestId = null;
                 return false;
             }
 
@@ -596,8 +651,16 @@ namespace PanelManager.Services
 
         private void HandleAuthResponse(Message msg)
         {
+            if (!_authInProgress || string.IsNullOrEmpty(_authRequestId) ||
+                !string.Equals(msg.Id, _authRequestId, StringComparison.Ordinal))
+            {
+                Log($"[Serial] 忽略未匹配的认证响应: {msg.Id}");
+                return;
+            }
+
             _authInProgress = false;
             _authStartedAtMs = 0;
+            _authRequestId = null;
 
             if (msg.Code != ErrorCode.Success || _serialPort == null || !_serialPort.IsOpen)
             {
@@ -848,28 +911,33 @@ namespace PanelManager.Services
 
         private async Task HandleWebMessage(IWebSocketConnection socket, string raw)
         {
-            Log($"[WS] 收到: {raw}");
-
             var msg = Message.FromJson(raw);
             if (msg == null)
             {
-                socket.Send(new Message { Code = ErrorCode.InvalidRequest, Msg = "Invalid JSON" }.ToJson());
+                await socket.Send(new Message { Code = ErrorCode.InvalidRequest, Msg = "Invalid JSON" }.ToJson());
                 return;
             }
 
             // 根据目标路由
             if (msg.Target == Target.Host)
             {
+                if (!PanelManagerHostCapability.Matches(msg.HostCapability))
+                {
+                    Log($"[WS] 拒绝未授权Host请求: {msg.Module}/{msg.Cmd}");
+                    await socket.Send(msg.Fail(ErrorCode.InvalidRequest, "Host capability is missing or invalid").ToJson());
+                    return;
+                }
+                Log($"[WS] Host请求: {msg.Module}/{msg.Cmd} id={msg.Id}");
                 // 发给上位机
                 var response = await HandleHostMessage(msg);
-                socket.Send(response.ToJson());
+                await socket.Send(response.ToJson());
             }
             else if (msg.Target == Target.Device)
             {
                 // 转发给下位机
                 if (!SendToDevice(raw))
                 {
-                    socket.Send(msg.Fail(ErrorCode.SerialNotOpen, "Serial port not open").ToJson());
+                    await socket.Send(msg.Fail(ErrorCode.SerialNotOpen, "Serial port not open").ToJson());
                 }
             }
         }
@@ -929,6 +997,11 @@ namespace PanelManager.Services
                 catch (Exception ex)
                 {
                     Log($"[Serial] 工作线程错误: {ex.Message}");
+                    if (IsFatalSerialWorkerError(ex))
+                    {
+                        DropSerialFromWorker(port, ex);
+                        break;
+                    }
                     Thread.Sleep(20);
                 }
 
@@ -937,6 +1010,61 @@ namespace PanelManager.Services
                     _serialTxSignal.WaitOne(5);
                 }
             }
+
+            CleanupSerialWorker(token);
+        }
+
+        private static bool IsFatalSerialWorkerError(Exception ex)
+        {
+            if (ex is System.IO.IOException || ex is UnauthorizedAccessException || ex is ObjectDisposedException)
+            {
+                return true;
+            }
+
+            var msg = ex.Message ?? string.Empty;
+            return msg.Contains("semaphore timeout period", StringComparison.OrdinalIgnoreCase) ||
+                msg.Contains("device attached to the system is not functioning", StringComparison.OrdinalIgnoreCase) ||
+                msg.Contains("The I/O operation has been aborted", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private void CleanupSerialWorker(CancellationToken token)
+        {
+            var cts = _serialWorkerCts;
+            if (cts == null || cts.Token != token)
+            {
+                return;
+            }
+
+            _serialWorkerCts = null;
+            _serialWorkerTask = null;
+            cts.Dispose();
+        }
+
+        private void DropSerialFromWorker(SerialPort portObj, Exception ex)
+        {
+            var portName = portObj.PortName;
+            try { if (portObj.IsOpen) portObj.Close(); } catch { }
+            try { portObj.Dispose(); } catch { }
+
+            if (ReferenceEquals(_serialPort, portObj))
+            {
+                _serialPort = null;
+                _deviceAuthenticated = false;
+                _authInProgress = false;
+                _authStartedAtMs = 0;
+                _authRequestId = null;
+                _serialOpenedAtMs = 0;
+                _serialBuffer = string.Empty;
+                _serialTxQueue.Clear();
+                _pendingChallenge?.TrySetResult(null);
+                _pendingChallenge = null;
+                _pendingAuthentication?.TrySetResult(null);
+                _pendingAuthentication = null;
+                _lastAuthChallengeData = null;
+            }
+
+            Log($"[Serial] 串口异常断开，等待自动重连: {portName} ({ex.Message})");
+            BroadcastEvent(Module.Serial, "disconnected", new { port = portName, reason = ex.Message });
         }
 
         private void ProcessSerialData(string data)
@@ -961,7 +1089,7 @@ namespace PanelManager.Services
                     Log($"[Serial] 收到: {line}");
 
                     // 尝试解析为协议消息
-                    var msg = Message.FromJson(line);
+                    var msg = Message.FromJson(line) ?? TryRecoverPartialProtocolLine(line);
                     if (msg != null)
                     {
                         var isChallenge = IsDeviceChallenge(msg);
@@ -980,6 +1108,15 @@ namespace PanelManager.Services
                         if (isAuthResponse)
                         {
                             HandleAuthResponse(msg);
+                        }
+
+                        if (!_deviceAuthenticated && msg.Type == MsgType.Event &&
+                            msg.Module == Module.System && msg.Cmd == "protocolError")
+                        {
+                            _authInProgress = false;
+                            _authStartedAtMs = 0;
+                            _authRequestId = null;
+                            Log("[Serial] 认证握手收到协议错误，等待设备重新下发 challenge");
                         }
 
                         // 检查是否有等待此消息的请求
@@ -1009,6 +1146,38 @@ namespace PanelManager.Services
             }
         }
 
+        private static Message? TryRecoverPartialProtocolLine(string line)
+        {
+            if (string.IsNullOrWhiteSpace(line)) return null;
+
+            if (line.Contains("challenge", StringComparison.Ordinal) &&
+                line.Contains(DeviceAuthProduct, StringComparison.Ordinal))
+            {
+                var match = System.Text.RegularExpressions.Regex.Match(
+                    line, "\"challenge\"\\s*:\\s*\"([0-9a-fA-F]{16})\"");
+                if (match.Success)
+                {
+                    return new Message
+                    {
+                        Version = 1,
+                        Id = $"recovered_{Guid.NewGuid():N}"[..18],
+                        Target = Target.Host,
+                        Type = MsgType.Event,
+                        Module = Module.System,
+                        Cmd = "challenge",
+                        Data = System.Text.Json.JsonSerializer.SerializeToElement(new
+                        {
+                            product = DeviceAuthProduct,
+                            challenge = match.Groups[1].Value
+                        }, JsonOptions.Default),
+                        Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+                    };
+                }
+            }
+
+            return null;
+        }
+
         #endregion
 
         #region 发送消息
@@ -1032,6 +1201,11 @@ namespace PanelManager.Services
         private bool SendToDeviceInternal(string json)
         {
             if (_serialPort == null || !_serialPort.IsOpen) return false;
+            if (_serialWorkerTask == null || _serialWorkerTask.IsCompleted)
+            {
+                Log($"[Serial] 发送失败，工作线程未运行: {CurrentPort}");
+                return false;
+            }
 
             if (!_serialTxQueue.TryEnqueue(json))
             {
