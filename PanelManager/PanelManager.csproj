@@ -10,6 +10,8 @@
         <ImplicitUsings>enable</ImplicitUsings>
         <EnableDefaultCssItems>false</EnableDefaultCssItems>
         <Nullable>enable</Nullable>
+        <PlatformTarget>x64</PlatformTarget>
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 
         <ApplicationTitle>PanelManager</ApplicationTitle>
         <ApplicationId>com.companyname.panelmanager</ApplicationId>
@@ -35,17 +37,19 @@
     </ItemGroup>
 
     <ItemGroup>
-        <Content Include="Tools\**">
-            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-        </Content>
-    </ItemGroup>
-
-    <ItemGroup>
       <Compile Remove="FloatingWindow\**" />
       <Content Remove="FloatingWindow\**" />
       <EmbeddedResource Remove="FloatingWindow\**" />
       <MauiXaml Remove="FloatingWindow\**" />
       <None Remove="FloatingWindow\**" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <None Update="Dependencies\Isd\IsdDownload.dll"
+              Link="IsdDownload.dll"
+              TargetPath="IsdDownload.dll"
+              CopyToOutputDirectory="PreserveNewest"
+              CopyToPublishDirectory="PreserveNewest" />
     </ItemGroup>
 
     <ItemGroup>

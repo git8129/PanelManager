@@ -98,13 +98,20 @@ function sendMessageWithTimeout(module, cmd, data, timeoutMs, callback) {
         'shortcut': 6,
         'app': 7,
         'panel': 8,
-        'update': 9
+        'update': 9,
+        'rk628Debug': 10,
+        'audio': 11
     };
     // 根据模块类型自动判断目标
     // system, serial, app -> Host (上位机处理)
-    // bluetooth, wifi, network, hid, shortcut, panel, update -> Device (下位机处理)
+    // bluetooth, wifi, network, hid, shortcut, panel, update, rk628Debug, audio -> Device (下位机处理)
     const hostModules = ['system', 'serial', 'app'];
     const target = hostModules.includes(module) ? 0 : 1; // 0=Host, 1=Device
+    const hostCapability = target === 0 ? window.__panelManagerHostCapability : undefined;
+    if (target === 0 && typeof hostCapability !== 'string') {
+        if (callback) callback({ code: 2, msg: 'Host capability unavailable' });
+        return false;
+    }
     const message = {
         v: 1,
         id: generateMessageId(),
@@ -113,6 +120,7 @@ function sendMessageWithTimeout(module, cmd, data, timeoutMs, callback) {
         mod: moduleMap[module] || 0,
         cmd: cmd,
         data: data,
+        cap: hostCapability,
         ts: Date.now()
     };
     if (callback) {
@@ -128,10 +136,10 @@ function sendMessageWithTimeout(module, cmd, data, timeoutMs, callback) {
     if (wsConnected && ws && ws.readyState === WebSocket.OPEN) {
         const json = JSON.stringify(message);
         ws.send(json);
-        console.log('[WebSocket] 发送:', message);
+        console.log('[WebSocket] 发送:', { ...message, cap: message.cap ? '<redacted>' : undefined });
         return true;
     } else {
-        console.warn('[WebSocket] 未连接，消息发送失败:', message);
+        console.warn('[WebSocket] 未连接，消息发送失败:', { ...message, cap: message.cap ? '<redacted>' : undefined });
         if (callback) {
             messageCallbacks.delete(message.id);
             callback({ code: 1, msg: 'WebSocket not connected' });
@@ -156,9 +164,40 @@ function handleWebSocketMessage(message) {
     }
     console.warn('[WebSocket] 未处理的消息:', message);
 }
+
+function formatDeviceCommandError(response, fallback = '未知错误') {
+    if (!response) {
+        return fallback;
+    }
+    if (response.localTimeout || response.code === 5) {
+        return response.msg || '设备响应超时';
+    }
+    if (response.code === 100) {
+        return '串口未连接或设备未认证';
+    }
+    if (response.code === 102) {
+        return '串口写入失败';
+    }
+    if (response.code === 8) {
+        return response.msg || '设备拒绝：未认证或权限不足';
+    }
+    return response.msg || fallback;
+}
+
+function isDeviceTransportError(response) {
+    if (!response) {
+        return true;
+    }
+    return response.localTimeout ||
+        response.code === 5 ||
+        response.code === 100 ||
+        response.code === 102 ||
+        response.code === 8;
+}
+
 // 处理事件消息
 function handleEvent(message) {
-    const moduleNames = ['system', 'serial', 'bluetooth', 'wifi', 'network', 'hid', 'shortcut', 'app', 'panel', 'update'];
+    const moduleNames = ['system', 'serial', 'bluetooth', 'wifi', 'network', 'hid', 'shortcut', 'app', 'panel', 'update', 'rk628Debug', 'audio'];
     const moduleName = moduleNames[message.mod] || 'unknown';
     console.log(`[Event] ${moduleName}:${message.cmd}`, message.data);
     // 根据事件类型处理
@@ -185,6 +224,13 @@ function handleEvent(message) {
             }
             break;
         }
+        case 'audio:micSourceChanged':
+            audioRouteApplyMicData(message.data);
+            audioRouteRenderSettings();
+            break;
+        case 'audio:eqChanged':
+            audioEqReload(true);
+            break;
         case 'system:status':
             console.log('[System] 状态:', message.data);
             hostDebugMode = !!message.data?.debug;
@@ -307,8 +353,6 @@ function handleEvent(message) {
             if (typeof activeUpdateTerminal !== 'undefined' && activeUpdateTerminal) {
                 appendTerminalLog(message.data?.text);
             }
-            // 同时处理手动更新日志
-            handleManualUpdateEvent('log', message.data);
             break;
         case 'update:event':
             // handleUpdateStatusEvent may not be defined in all contexts
@@ -317,6 +361,9 @@ function handleEvent(message) {
             }
             // 同时处理手动更新事件
             handleManualUpdateEvent('event', message.data);
+            break;
+        case 'update:isdUpdateProgress':
+            handleManualUpdateProgress(message.data || {});
             break;
         // 蓝牙事件处理
         case 'bluetooth:initialized':
@@ -942,7 +989,7 @@ window.goToPage = (page) => {
         ind.classList.toggle('active', idx === page);
     });
 };
-function initSettingsNav() {
+function initSettingsNav(defaultTargetId = null) {
     const nav = document.querySelector('.settings-nav');
     if (!nav) {
         return;
@@ -967,6 +1014,7 @@ function initSettingsNav() {
             scanWifi();
         } else {
             stopWifiAutoScan();
+            stopWifiDeviceScan();
         }
 
         if (targetId === 'settings-bluetooth') {
@@ -978,6 +1026,10 @@ function initSettingsNav() {
             // leaving bluetooth page: disable discoverable/connectable (save power)
             sendMessage('bluetooth', 'setVisibility', { enable: 0 }, () => { });
         }
+
+        if (targetId === 'settings-display') {
+            rk628ScaleModeLoad(true);
+        }
     };
     if (nav.dataset.bound !== '1') {
         buttons.forEach((btn) => {
@@ -985,13 +1037,21 @@ function initSettingsNav() {
         });
         nav.dataset.bound = '1';
     }
-    const defaultButton = nav.querySelector('.settings-nav-item.active') || buttons[0];
+    const defaultButton = defaultTargetId
+        ? nav.querySelector(`.settings-nav-item[data-settings-target="${defaultTargetId}"]`)
+        : (nav.querySelector('.settings-nav-item.active') || buttons[0]);
     if (defaultButton) {
         activate(defaultButton.dataset.settingsTarget);
     }
 }
 window.openPage = (pageName, tabName) => {
+    if (pageName !== 'settings') {
+        stopWifiAutoScan();
+        stopWifiDeviceScan();
+    }
+
     document.getElementById('desktop-view').classList.remove('active');
+    document.querySelectorAll('.detail-page').forEach(page => page.classList.remove('active'));
     const pageEl = document.getElementById('page-' + pageName);
     pageEl.classList.add('active');
 
@@ -1022,7 +1082,7 @@ window.openPage = (pageName, tabName) => {
             // 否则只是刷新显示
             renderAppsList();
         }
-        initSettingsNav();
+        initSettingsNav(tabName || null);
     }
 
     // 如果打开 AI 页面，启动/连接 OpenCode sidecar
@@ -1032,6 +1092,10 @@ window.openPage = (pageName, tabName) => {
 
     if (pageName === 'touch-calibration') {
         touchCal2OpenPage();
+    }
+
+    if (pageName === 'audio-eq') {
+        audioEqOpenPage();
     }
 };
 window.closePage = () => {
@@ -1072,6 +1136,7 @@ window.closePage = () => {
 
     // 离开详情页时停止 WiFi/蓝牙自动扫描（仅在对应设置页开启）
     stopWifiAutoScan();
+    stopWifiDeviceScan();
     stopBluetoothAutoScan();
 
     document.querySelectorAll('.detail-page').forEach(page => page.classList.remove('active'));
@@ -1807,20 +1872,50 @@ function ai2LsDel(k) {
 
 const AUDIO_ROUTE_HDMI = 'hdmi';
 const AUDIO_ROUTE_UAC = 'uac';
+const AUDIO_MIC_ONBOARD = 'onboard';
+const AUDIO_MIC_HEADSET = 'headset';
+const AUDIO_EQ_DEFAULT_FREQS = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
+const AUDIO_EQ_MIN_FREQ = 20;
+const AUDIO_EQ_MAX_FREQ = 22000;
+const AUDIO_EQ_MIN_GAIN = -18;
+const AUDIO_EQ_MAX_GAIN = 18;
+const AUDIO_EQ_TYPES = [
+    { value: 'peak', label: '峰值', id: 2 },
+    { value: 'lowShelf', label: '低架', id: 4 },
+    { value: 'highShelf', label: '高架', id: 3 },
+    { value: 'highPass', label: '高通', id: 0 },
+    { value: 'lowPass', label: '低通', id: 1 }
+];
 let audioRouteState = {
     localPlayback: AUDIO_ROUTE_HDMI,
-    bluetoothOutput: AUDIO_ROUTE_UAC
+    bluetoothOutput: AUDIO_ROUTE_UAC,
+    micInput: AUDIO_MIC_ONBOARD
+};
+
+let audioEqState = {
+    loaded: false,
+    dirty: false,
+    globalGain: 0,
+    selectedIndex: 0,
+    draggingIndex: null,
+    bands: AUDIO_EQ_DEFAULT_FREQS.map((freq, index) => ({ index, freq, gain: 0, q: 0.7, type: 'peak' }))
 };
 
 function audioRouteNormalize(value, fallback = AUDIO_ROUTE_HDMI) {
     return value === AUDIO_ROUTE_UAC ? AUDIO_ROUTE_UAC : fallback;
 }
 
+function audioMicNormalize(value, fallback = AUDIO_MIC_ONBOARD) {
+    return value === AUDIO_MIC_HEADSET ? AUDIO_MIC_HEADSET : fallback;
+}
+
 function audioRouteRenderSettings() {
     const localSelect = document.getElementById('audioLocalRouteSelect');
     const btSelect = document.getElementById('audioBluetoothRouteSelect');
+    const micSelect = document.getElementById('audioMicRouteSelect');
     if (localSelect) localSelect.value = audioRouteState.localPlayback;
     if (btSelect) btSelect.value = audioRouteState.bluetoothOutput;
+    if (micSelect) micSelect.value = audioRouteState.micInput;
 }
 
 function audioRouteDeviceReady() {
@@ -1837,6 +1932,23 @@ function audioRouteApplyDeviceData(data) {
     }
 }
 
+function audioRouteApplyMicData(data) {
+    if (!data || !data.source) return;
+    audioRouteState.micInput = audioMicNormalize(data.source, AUDIO_MIC_ONBOARD);
+}
+
+function sendAudioCommand(cmd, data = null) {
+    return new Promise((resolve, reject) => {
+        sendMessage('audio', cmd, data, (response) => {
+            if (response.code === 0) {
+                resolve(response);
+            } else {
+                reject(response);
+            }
+        });
+    });
+}
+
 async function audioRouteSyncFromDevice() {
     if (!audioRouteDeviceReady()) {
         audioRouteRenderSettings();
@@ -1847,6 +1959,18 @@ async function audioRouteSyncFromDevice() {
         const result = await sendRK628Command(17, null);
         const data = result?.data || {};
         audioRouteApplyDeviceData(data);
+        try {
+            const micResult = await sendAudioCommand('getMicSource', null);
+            audioRouteApplyMicData(micResult?.data);
+        } catch (micErr) {
+            console.warn('[AudioRoute] sync mic source failed:', micErr);
+        }
+        try {
+            const eqResult = await sendAudioCommand('getEq', null);
+            audioEqApplyDeviceData(eqResult?.data);
+        } catch (eqErr) {
+            console.warn('[AudioRoute] sync EQ failed:', eqErr);
+        }
         audioRouteRenderSettings();
         return true;
     } catch (err) {
@@ -1889,11 +2013,390 @@ function audioRouteApplyToDevice(silent = false) {
     });
 }
 
+function audioMicApplyToDevice(silent = false) {
+    return new Promise((resolve) => {
+        if (!audioRouteDeviceReady()) {
+            if (!silent) {
+                showToast('下位机未连接，无法修改麦克风来源', 2500);
+            }
+            audioRouteRenderSettings();
+            resolve(null);
+            return;
+        }
+
+        sendAudioCommand('setMicSource', { source: audioRouteState.micInput }).then((resp) => {
+            audioRouteApplyMicData(resp?.data);
+            audioRouteRenderSettings();
+            if (!silent) showToast('麦克风来源已更新');
+            resolve(resp);
+        }).catch((err) => {
+            console.warn('[AudioRoute] 麦克风来源设置失败:', err);
+            if (!silent) {
+                showToast('麦克风来源设置失败，请检查下位机状态', 2500);
+            }
+            resolve(null);
+        });
+    });
+}
+
+function audioEqFormatFreq(freq) {
+    const n = Number(freq) || 0;
+    return n >= 1000 ? `${Number((n / 1000).toFixed(n >= 10000 ? 0 : 1))} kHz` : `${Math.round(n)} Hz`;
+}
+
+function audioEqClampGain(value) {
+    const n = Number.parseFloat(value);
+    if (!Number.isFinite(n)) return 0;
+    return Math.max(AUDIO_EQ_MIN_GAIN, Math.min(AUDIO_EQ_MAX_GAIN, Math.round(n * 10) / 10));
+}
+
+function audioEqClampFreq(value) {
+    const n = Number.parseFloat(value);
+    if (!Number.isFinite(n)) return 1000;
+    return Math.max(AUDIO_EQ_MIN_FREQ, Math.min(AUDIO_EQ_MAX_FREQ, Math.round(n)));
+}
+
+function audioEqClampQ(value) {
+    const n = Number.parseFloat(value);
+    if (!Number.isFinite(n)) return 0.7;
+    return Math.max(0.3, Math.min(30, Math.round(n * 100) / 100));
+}
+
+function audioEqNormalizeType(value, typeId = null) {
+    if (typeof value === 'string' && AUDIO_EQ_TYPES.some(t => t.value === value)) return value;
+    if (value === 'bandPass') return 'peak';
+    const id = Number(typeId ?? value);
+    const matched = AUDIO_EQ_TYPES.find(t => t.id === id);
+    return matched ? matched.value : 'peak';
+}
+
+function audioEqTypeLabel(type) {
+    return (AUDIO_EQ_TYPES.find(t => t.value === type) || AUDIO_EQ_TYPES[0]).label;
+}
+
+function audioEqFreqToX(freq) {
+    const min = Math.log10(AUDIO_EQ_MIN_FREQ);
+    const max = Math.log10(AUDIO_EQ_MAX_FREQ);
+    return ((Math.log10(audioEqClampFreq(freq)) - min) / (max - min)) * 100;
+}
+
+function audioEqXToFreq(xPercent) {
+    const min = Math.log10(AUDIO_EQ_MIN_FREQ);
+    const max = Math.log10(AUDIO_EQ_MAX_FREQ);
+    const t = Math.max(0, Math.min(100, xPercent)) / 100;
+    return audioEqClampFreq(10 ** (min + (max - min) * t));
+}
+
+function audioEqGainToY(gain) {
+    return ((AUDIO_EQ_MAX_GAIN - audioEqClampGain(gain)) / (AUDIO_EQ_MAX_GAIN - AUDIO_EQ_MIN_GAIN)) * 100;
+}
+
+function audioEqYToGain(yPercent) {
+    const t = Math.max(0, Math.min(100, yPercent)) / 100;
+    return audioEqClampGain(AUDIO_EQ_MAX_GAIN - (AUDIO_EQ_MAX_GAIN - AUDIO_EQ_MIN_GAIN) * t);
+}
+
+function audioEqCurvePoints(width = 1000, height = 360) {
+    return audioEqState.bands
+        .map((band) => ({ x: audioEqFreqToX(band.freq), y: audioEqGainToY(band.gain) }))
+        .sort((a, b) => a.x - b.x)
+        .map(p => `${(p.x / 100) * width},${(p.y / 100) * height}`)
+        .join(' ');
+}
+
+function audioEqSetStatus(text) {
+    const el = document.getElementById('audioEqStatusText');
+    if (el) el.textContent = text;
+}
+
+function audioEqApplyDeviceData(data) {
+    if (!data) return;
+    audioEqState.globalGain = audioEqClampGain(Number.isFinite(Number(data.ggx)) ? Number(data.ggx) / 10 : (Number.isFinite(Number(data.global_gain_x10)) ? Number(data.global_gain_x10) / 10 : (data.global_gain ?? 0)));
+    const deviceBands = Array.isArray(data.bands) ? data.bands : (Array.isArray(data.b) ? data.b : []);
+    if (deviceBands.length > 0) {
+        audioEqState.bands = deviceBands.slice(0, 10).map((band, index) => ({
+            index: Number.isFinite(Number(band.i ?? band.index)) ? Number(band.i ?? band.index) : index,
+            freq: Number.isFinite(Number(band.f ?? band.freq)) ? Number(band.f ?? band.freq) : (AUDIO_EQ_DEFAULT_FREQS[index] || 0),
+            gain: audioEqClampGain(Number.isFinite(Number(band.gx ?? band.gain_x10)) ? Number(band.gx ?? band.gain_x10) / 10 : (band.gain ?? 0)),
+            q: audioEqClampQ(Number.isFinite(Number(band.qx ?? band.q_x100)) ? Number(band.qx ?? band.q_x100) / 100 : (band.q ?? 0.7)),
+            type: audioEqNormalizeType(band.type, band.t ?? band.type_id)
+        }));
+    }
+    while (audioEqState.bands.length < 10) {
+        const index = audioEqState.bands.length;
+        audioEqState.bands.push({ index, freq: AUDIO_EQ_DEFAULT_FREQS[index], gain: 0, q: 0.7, type: 'peak' });
+    }
+    if (!audioEqState.bands[audioEqState.selectedIndex]) {
+        audioEqState.selectedIndex = 0;
+    }
+    audioEqState.loaded = true;
+    audioEqState.dirty = false;
+    audioEqUpdateSettingsSummary();
+}
+
+function audioEqUpdateSettingsSummary() {
+    const el = document.getElementById('audioEqSettingsSummary');
+    if (!el) return;
+    const changedBands = audioEqState.bands.filter((band, index) =>
+        band.freq !== AUDIO_EQ_DEFAULT_FREQS[index] ||
+        band.gain !== 0 || band.q !== 0.7 || band.type !== 'peak').length;
+    const parts = [];
+    if (changedBands) parts.push(`${changedBands} 段已调整`);
+    if (audioEqState.globalGain !== 0) parts.push(`总增益 ${audioEqState.globalGain} dB`);
+    if (!parts.length) parts.push('平直');
+    if (audioEqState.dirty) parts.push('未保存');
+    el.textContent = parts.join(' · ');
+}
+
+function audioEqRender() {
+    const container = document.getElementById('audioEqBands');
+    const global = document.getElementById('audioEqGlobalGain');
+    const globalValue = document.getElementById('audioEqGlobalValue');
+    if (global) global.value = String(audioEqState.globalGain);
+    if (globalValue) globalValue.textContent = `${audioEqState.globalGain} dB`;
+    if (!container) return;
+    const selected = audioEqState.bands[audioEqState.selectedIndex] || audioEqState.bands[0];
+
+    container.innerHTML = `
+        <div class="audio-eq-workspace">
+            <div class="audio-eq-graph-card">
+                <div class="audio-eq-gain-mark top">+18 dB</div>
+                <div class="audio-eq-gain-mark mid">0 dB</div>
+                <div class="audio-eq-gain-mark bottom">-18 dB</div>
+                <div class="audio-eq-plot" id="audioEqPlot">
+                    <svg class="audio-eq-curve" viewBox="0 0 1000 360" preserveAspectRatio="none" aria-hidden="true">
+                        <polyline id="audioEqCurveLine" points="${audioEqCurvePoints()}" />
+                    </svg>
+                    ${audioEqState.bands.map((band, index) => `
+                        <button class="audio-eq-point${index === audioEqState.selectedIndex ? ' active' : ''}" type="button" data-eq-index="${index}" aria-label="控制点 ${index + 1}，${audioEqFormatFreq(band.freq)}，${band.gain} dB，Q ${band.q}，${audioEqTypeLabel(band.type)}" aria-pressed="${index === audioEqState.selectedIndex}" style="left:${audioEqFreqToX(band.freq)}%;top:${audioEqGainToY(band.gain)}%;">
+                            <span>${index + 1}</span>
+                            <em>${audioEqFormatFreq(band.freq)} · ${band.gain} dB · Q ${band.q} · ${audioEqTypeLabel(band.type)}</em>
+                        </button>
+                    `).join('')}
+                </div>
+                <div class="audio-eq-frequency-ruler">
+                    <span>20 Hz</span><span>100 Hz</span><span>1 kHz</span><span>10 kHz</span><span>22 kHz</span>
+                </div>
+            </div>
+            <div class="audio-eq-editor">
+                <div class="audio-eq-editor-title">控制点 ${audioEqState.selectedIndex + 1}</div>
+                <label><span>中心频率</span><input id="audioEqFreqInput" class="input-base" type="number" min="${AUDIO_EQ_MIN_FREQ}" max="${AUDIO_EQ_MAX_FREQ}" step="1" value="${selected?.freq ?? 1000}"></label>
+                <label><span>增益 dB</span><input id="audioEqGainInput" class="input-base" type="number" min="${AUDIO_EQ_MIN_GAIN}" max="${AUDIO_EQ_MAX_GAIN}" step="0.1" value="${selected?.gain ?? 0}"></label>
+                <label><span>Q 值</span><input id="audioEqQInput" class="input-base" type="number" min="0.3" max="30" step="0.01" value="${selected?.q ?? 0.7}"></label>
+                <label><span>类型</span><select id="audioEqTypeSelect" class="select-base">
+                    ${AUDIO_EQ_TYPES.map(type => `<option value="${type.value}"${type.value === (selected?.type ?? 'peak') ? ' selected' : ''}>${type.label}</option>`).join('')}
+                </select></label>
+                <div class="audio-eq-editor-hint">悬停控制点可查看当前参数；拖动控制点会同时更新频率和增益。</div>
+            </div>
+        </div>
+    `;
+
+    audioEqBindGraph();
+    audioEqBindEditor();
+}
+
+function audioEqUpdateEditorValues() {
+    const band = audioEqState.bands[audioEqState.selectedIndex];
+    if (!band) return;
+    const title = document.querySelector('.audio-eq-editor-title');
+    const freq = document.getElementById('audioEqFreqInput');
+    const gain = document.getElementById('audioEqGainInput');
+    const q = document.getElementById('audioEqQInput');
+    const type = document.getElementById('audioEqTypeSelect');
+    if (title) title.textContent = `控制点 ${audioEqState.selectedIndex + 1}`;
+    if (freq) freq.value = String(band.freq);
+    if (gain) gain.value = String(band.gain);
+    if (q) q.value = String(band.q);
+    if (type) type.value = band.type;
+}
+
+function audioEqUpdateGraphDom() {
+    const curve = document.getElementById('audioEqCurveLine');
+    if (curve) curve.setAttribute('points', audioEqCurvePoints());
+    document.querySelectorAll('.audio-eq-point').forEach((point) => {
+        const index = Number(point.dataset.eqIndex);
+        const band = audioEqState.bands[index];
+        if (!band) return;
+        point.style.left = `${audioEqFreqToX(band.freq)}%`;
+        point.style.top = `${audioEqGainToY(band.gain)}%`;
+        point.classList.toggle('active', index === audioEqState.selectedIndex);
+        point.setAttribute('aria-pressed', index === audioEqState.selectedIndex ? 'true' : 'false');
+        point.setAttribute('aria-label', `控制点 ${index + 1}，${audioEqFormatFreq(band.freq)}，${band.gain} dB，Q ${band.q}，${audioEqTypeLabel(band.type)}`);
+        const bubble = point.querySelector('em');
+        if (bubble) bubble.textContent = `${audioEqFormatFreq(band.freq)} · ${band.gain} dB · Q ${band.q} · ${audioEqTypeLabel(band.type)}`;
+    });
+    audioEqUpdateEditorValues();
+    audioEqUpdateSettingsSummary();
+}
+
+function audioEqSetBandFromPointer(index, clientX, clientY) {
+    const plot = document.getElementById('audioEqPlot');
+    const band = audioEqState.bands[index];
+    if (!plot || !band) return;
+    const rect = plot.getBoundingClientRect();
+    const x = ((clientX - rect.left) / rect.width) * 100;
+    const y = ((clientY - rect.top) / rect.height) * 100;
+    band.freq = audioEqXToFreq(x);
+    band.gain = audioEqYToGain(y);
+    audioEqState.dirty = true;
+    audioEqUpdateGraphDom();
+}
+
+function audioEqBindGraph() {
+    const container = document.getElementById('audioEqBands');
+    if (!container) return;
+    container.querySelectorAll('.audio-eq-point').forEach((point) => {
+        point.addEventListener('focus', (e) => {
+            const index = Number(e.currentTarget.dataset.eqIndex);
+            if (!audioEqState.bands[index]) return;
+            audioEqState.selectedIndex = index;
+            audioEqUpdateGraphDom();
+        });
+        point.addEventListener('pointerdown', (e) => {
+            const index = Number(e.currentTarget.dataset.eqIndex);
+            if (!audioEqState.bands[index]) return;
+            e.preventDefault();
+            audioEqState.selectedIndex = index;
+            audioEqState.draggingIndex = index;
+            e.currentTarget.setPointerCapture?.(e.pointerId);
+            audioEqSetBandFromPointer(index, e.clientX, e.clientY);
+        });
+    });
+}
+
+document.addEventListener('pointermove', (e) => {
+    if (audioEqState.draggingIndex === null) return;
+    audioEqSetBandFromPointer(audioEqState.draggingIndex, e.clientX, e.clientY);
+});
+
+document.addEventListener('pointerup', () => {
+    audioEqState.draggingIndex = null;
+});
+
+function audioEqBindEditor() {
+    const freq = document.getElementById('audioEqFreqInput');
+    const gain = document.getElementById('audioEqGainInput');
+    const q = document.getElementById('audioEqQInput');
+    const type = document.getElementById('audioEqTypeSelect');
+    const apply = () => {
+        const band = audioEqState.bands[audioEqState.selectedIndex];
+        if (!band) return;
+        if (freq) band.freq = audioEqClampFreq(freq.value);
+        if (gain) band.gain = audioEqClampGain(gain.value);
+        if (q) band.q = audioEqClampQ(q.value);
+        if (type) band.type = audioEqNormalizeType(type.value);
+        audioEqState.dirty = true;
+        audioEqUpdateGraphDom();
+    };
+    [freq, gain, q, type].forEach((el) => {
+        if (el) el.addEventListener('input', apply);
+    });
+}
+
+function audioEqBindPage() {
+    const global = document.getElementById('audioEqGlobalGain');
+    if (global && !global.dataset.bound) {
+        global.dataset.bound = '1';
+        global.addEventListener('input', (e) => {
+            audioEqState.globalGain = audioEqClampGain(e.target.value);
+            audioEqState.dirty = true;
+            const value = document.getElementById('audioEqGlobalValue');
+            if (value) value.textContent = `${audioEqState.globalGain} dB`;
+            audioEqUpdateSettingsSummary();
+        });
+    }
+}
+
+function audioEqOpenPage() {
+    audioEqBindPage();
+    audioEqRender();
+    if (audioEqState.dirty) {
+        audioEqSetStatus('当前有未保存的 EQ 修改');
+    } else {
+        audioEqReload(false);
+    }
+}
+
+function audioEqReload(silent = false, force = false) {
+    const page = document.getElementById('page-audio-eq');
+    if (silent && (!page || !page.classList.contains('active'))) return;
+    if (audioEqState.dirty && !force) {
+        if (silent) return;
+        confirmModal('重新读取会覆盖当前未保存的 EQ 修改，是否继续？', () => audioEqReload(false, true), '放弃未保存修改');
+        return;
+    }
+    if (!audioRouteDeviceReady()) {
+        audioEqSetStatus('下位机未连接，无法读取 EQ');
+        if (!silent) showToast('下位机未连接，无法读取 EQ', 2500);
+        return;
+    }
+
+    audioEqSetStatus('正在读取下位机保存的 EQ...');
+    sendAudioCommand('getEq', null).then((resp) => {
+        audioEqApplyDeviceData(resp?.data);
+        audioEqRender();
+        audioEqSetStatus('已读取下位机保存的 EQ');
+    }).catch((err) => {
+        console.warn('[AudioEQ] getEq failed:', err);
+        audioEqSetStatus('读取 EQ 失败，请检查下位机状态');
+        if (!silent) showToast('读取 EQ 失败', 2500);
+    });
+}
+
+function audioEqBuildPayload() {
+    return {
+        persist: true,
+        global_gain_x10: Math.round(audioEqState.globalGain * 10),
+        bands: audioEqState.bands.map((band, index) => ({
+            index,
+            freq: audioEqClampFreq(band.freq),
+            gain_x10: Math.round(audioEqClampGain(band.gain) * 10),
+            q_x100: Math.round(audioEqClampQ(band.q) * 100),
+            type: audioEqNormalizeType(band.type)
+        }))
+    };
+}
+
+function audioEqSave() {
+    if (!audioRouteDeviceReady()) {
+        showToast('下位机未连接，无法保存 EQ', 2500);
+        return;
+    }
+    audioEqSetStatus('正在保存 EQ 到下位机...');
+    sendAudioCommand('setEq', audioEqBuildPayload()).then((resp) => {
+        audioEqApplyDeviceData(resp?.data);
+        audioEqRender();
+        audioEqSetStatus('EQ 已保存，下次启动会自动加载');
+        showToast('EQ 已保存到下位机');
+    }).catch((err) => {
+        console.warn('[AudioEQ] setEq failed:', err);
+        audioEqSetStatus('保存 EQ 失败，请检查参数或下位机状态');
+        showToast('保存 EQ 失败', 2500);
+    });
+}
+
+function audioEqReset() {
+    audioEqState.globalGain = 0;
+    audioEqState.bands = audioEqState.bands.map((band, index) => ({
+        index,
+        freq: AUDIO_EQ_DEFAULT_FREQS[index] || band.freq || 1000,
+        gain: 0,
+        q: 0.7,
+        type: 'peak'
+    }));
+    audioEqState.selectedIndex = 0;
+    audioEqState.dirty = true;
+    audioEqRender();
+    audioEqSetStatus('已恢复平直参数，尚未保存');
+    audioEqUpdateSettingsSummary();
+}
+
 function initAudioRouteSettings() {
     audioRouteRenderSettings();
 
     const localSelect = document.getElementById('audioLocalRouteSelect');
     const btSelect = document.getElementById('audioBluetoothRouteSelect');
+    const micSelect = document.getElementById('audioMicRouteSelect');
 
     if (localSelect && !localSelect.dataset.bound) {
         localSelect.dataset.bound = '1';
@@ -1923,6 +2426,20 @@ function initAudioRouteSettings() {
         });
     }
 
+    if (micSelect && !micSelect.dataset.bound) {
+        micSelect.dataset.bound = '1';
+        micSelect.addEventListener('change', async (e) => {
+            const previous = audioRouteState.micInput;
+            audioRouteState.micInput = audioMicNormalize(e.target.value, AUDIO_MIC_ONBOARD);
+            audioRouteRenderSettings();
+            const resp = await audioMicApplyToDevice(false);
+            if (!resp) {
+                audioRouteState.micInput = previous;
+                audioRouteRenderSettings();
+            }
+        });
+    }
+
     audioRouteSyncFromDevice();
 }
 
@@ -1941,7 +2458,6 @@ function aiBuildWelcomeHelpText() {
         '- 新增功能：`请为 xxx 增加功能，完成后自检并继续修到编译通过`',
         '- 修改 Bug：`请排查 xxx 问题，只修首个错误并持续重试`',
         '- 页面调试：会优先安装并使用 `agent-browser`',
-        '- 修改 UI：会优先安装并使用 `ui-ux-pro-max-skill`',
         '- 编译结果：当前工程的 `.sandbox/artifacts/build-cli`',
         '- 发布结果：当前工程的 `.sandbox/artifacts/publish/windows-win-x64`',
         '- 源码包：发布目录中的 `PanelManager-source-*.zip`',
@@ -6518,19 +7034,50 @@ function initSettings() {
     });
     // WiFi开关
     const wifiSwitchInput = document.getElementById('wifiSwitchInput');
-    wifiSwitchInput.addEventListener('change', function (e) {
-        e.stopPropagation();
-        handleWifiSwitchChange(this.checked);
-    });
+    const wifiSwitchRow = document.getElementById('wifiSwitchRow');
+    if (wifiSwitchInput && wifiSwitchRow) {
+        wifiSwitchRow.addEventListener('click', function (e) {
+            if (e.target && e.target.closest && e.target.closest('input')) {
+                return;
+            }
+            e.preventDefault();
+            e.stopPropagation();
+            wifiSwitchInput.checked = !wifiSwitchInput.checked;
+            handleWifiSwitchChange(wifiSwitchInput.checked);
+        });
+        wifiSwitchInput.addEventListener('click', function (e) {
+            e.stopPropagation();
+        });
+        wifiSwitchInput.addEventListener('change', function (e) {
+            e.stopPropagation();
+            handleWifiSwitchChange(this.checked);
+        });
+    }
     // 蓝牙扫描按钮
     // Bluetooth switch event listener
     const bluetoothSwitchInput = document.getElementById('bluetoothSwitchInput');
-    bluetoothSwitchInput.addEventListener('change', function (e) {
-        e.stopPropagation();
-        handleBluetoothSwitchChange(e.target.checked);
-    });
+    const bluetoothSwitchRow = document.getElementById('bluetoothSwitchRow');
+    if (bluetoothSwitchInput && bluetoothSwitchRow) {
+        bluetoothSwitchRow.addEventListener('click', function (e) {
+            if (e.target && e.target.closest && e.target.closest('input')) {
+                return;
+            }
+            e.preventDefault();
+            e.stopPropagation();
+            bluetoothSwitchInput.checked = !bluetoothSwitchInput.checked;
+            handleBluetoothSwitchChange(bluetoothSwitchInput.checked);
+        });
+        bluetoothSwitchInput.addEventListener('click', function (e) {
+            e.stopPropagation();
+        });
+        bluetoothSwitchInput.addEventListener('change', function (e) {
+            e.stopPropagation();
+            handleBluetoothSwitchChange(e.target.checked);
+        });
+    }
 
     initAudioRouteSettings();
+    initRk628ScaleModeSetting();
 }
 // ========== WiFi管理 ==========
 let wifiNetworks = [];  // 扫描到的 WiFi 网络列表
@@ -6666,7 +7213,7 @@ function handleWifiSwitchChange(isOn) {
             } else {
                 // 失败则恢复开关状态
                 document.getElementById('wifiSwitchInput').checked = true;
-                showToast(`WiFi 关闭失败: ${response.msg || '未知错误'}`);
+                showToast(`WiFi 关闭失败: ${formatDeviceCommandError(response)}`);
             }
         });
     }
@@ -6695,7 +7242,7 @@ function switchToStaMode() {
         } else {
             // 失败则恢复开关状态
             document.getElementById('wifiSwitchInput').checked = false;
-            showToast(`WiFi 开启失败: ${response.msg || '未知错误'}`);
+            showToast(`WiFi 开启失败: ${formatDeviceCommandError(response)}`);
         }
     });
 }
@@ -6713,7 +7260,7 @@ function switchToMonitorMode() {
         } else {
             // 失败则恢复开关状态
             document.getElementById('wifiSwitchInput').checked = false;
-            showToast(`WiFi 开启失败: ${response.msg || '未知错误'}`);
+            showToast(`WiFi 开启失败: ${formatDeviceCommandError(response)}`);
         }
     });
 }
@@ -6749,6 +7296,18 @@ function stopWifiAutoScan() {
         clearInterval(wifiAutoScanInterval);
         wifiAutoScanInterval = null;
     }
+}
+function stopWifiDeviceScan() {
+    if (!wifiStatus.scanning) {
+        return;
+    }
+    sendMessage('wifi', 'stopScan', {}, (response) => {
+        if (response.code === 0) {
+            wifiStatus.scanning = false;
+        } else {
+            console.warn('[WiFi] 停止扫描失败:', response.msg);
+        }
+    });
 }
 // 静默扫描WiFi（不显示加载状态）
 function scanWifiSilent() {
@@ -6821,6 +7380,12 @@ function switchToStaModeAuto() {
             wifiStatus.mode = 1;
             enableWifiUI();
             showToast('WiFi 已开启（自动连接）');
+            return;
+        }
+        if (isDeviceTransportError(response)) {
+            console.warn('[WiFi] STA 自动连接请求失败:', response);
+            document.getElementById('wifiSwitchInput').checked = false;
+            showToast(`WiFi 开启失败: ${formatDeviceCommandError(response)}`);
             return;
         }
         console.log('[WiFi] STA 自动连接不可用，切换到扫描模式:', response);
@@ -7276,7 +7841,7 @@ function handleBluetoothSwitchChange(isOn) {
             } else {
                 // 失败则恢复开关状态
                 document.getElementById('bluetoothSwitchInput').checked = false;
-                showToast(`蓝牙开启失败: ${response.msg || '未知错误'}`);
+                showToast(`蓝牙开启失败: ${formatDeviceCommandError(response)}`);
             }
         });
     } else {
@@ -7307,7 +7872,7 @@ function handleBluetoothSwitchChange(isOn) {
             } else {
                 // 失败则恢复开关状态
                 document.getElementById('bluetoothSwitchInput').checked = true;
-                showToast(`蓝牙关闭失败: ${response.msg || '未知错误'}`);
+                showToast(`蓝牙关闭失败: ${formatDeviceCommandError(response)}`);
             }
         });
     }
@@ -10405,7 +10970,8 @@ window.togglePanel = () => {
             updatePanelUI();
             showToast(panelEnabled ? '面板已开启' : '面板已关闭');
         } else {
-            showToast('面板状态切换失败');
+            console.warn('[Panel] 状态切换失败:', response);
+            showToast(`面板状态切换失败: ${formatDeviceCommandError(response)}`);
         }
     });
 };
@@ -11005,7 +11571,7 @@ function updateUpdateProgress(data) {
             updateStatus.textContent = `正在下载固件... ${data.downloaded || 0}/${data.total || 0} KB`;
         }
     } else if (data.status === 'decrypting') {
-        // 解密中（AES-CTR流式解密）
+        // 固件数据处理中
         updateStatus.textContent = '正在解密固件...';
         if (updateProgressDetails) updateProgressDetails.textContent = detail || 'AES-CTR解密 + SHA256校验...';
     } else if (data.status === 'writing') {
@@ -11097,7 +11663,7 @@ function browseFirmwareFile() {
             }
         } else {
             console.error('[browseFirmwareFile] Error:', response);
-            showToast('文件选择失败: ' + (response.msg || '未知错误'));
+            showToast('固件文件选择失败');
         }
     });
 }
@@ -11109,31 +11675,31 @@ function startManualUpdate() {
     const pathInput = document.getElementById('manualUpdatePath');
     const preserveInput = document.getElementById('manualUpdatePreserveUserData');
 
-    const elfPath = pathInput.value.trim();
+    const pmfwPath = pathInput.value.trim();
     const preserveUserData = preserveInput ? preserveInput.checked : true;
-    if (!elfPath) {
-        showToast('请输入 sdk.elf 文件路径');
+    if (!pmfwPath) {
+        showToast('请选择 PMFW 固件包');
         return;
     }
 
     if (!preserveUserData) {
-        confirmFormatAllBeforeManualUpdate(elfPath);
+        confirmFormatAllBeforeManualUpdate(pmfwPath);
         return;
     }
 
-    continueManualUpdateAfterDataWarning(elfPath, preserveUserData);
+    continueManualUpdateAfterDataWarning(pmfwPath, preserveUserData);
 }
 
-function confirmFormatAllBeforeManualUpdate(elfPath) {
+function confirmFormatAllBeforeManualUpdate(pmfwPath) {
     showModal('确认清空用户数据', `
         <div style="line-height:1.7;">
             <div style="font-weight:900; color: rgba(255, 69, 58, 1);">危险操作：本次烧录将执行全量格式化。</div>
-            <div style="margin-top:10px; color:var(--text-secondary);">未勾选“保留用户数据”时，上位机会向烧录工具追加 <code>-format all</code>，会清空设备上的 VM、USER、FlashDB、EXTFLASH 等用户/数据库/扩展数据区。</div>
+            <div style="margin-top:10px; color:var(--text-secondary);">未勾选“保留用户数据”时，上位机会擦除完整 16 MiB Flash，包括 VM、USER、FlashDB、EXTFLASH 等用户/数据库/扩展数据区。</div>
             <div style="margin-top:10px; color:var(--text-secondary);">如果需要保留配网、绑定、数据库或扩展存储数据，请取消并重新勾选“保留用户数据”。</div>
         </div>
     `, () => {
         closeMainModal();
-        continueManualUpdateAfterDataWarning(elfPath, false);
+        continueManualUpdateAfterDataWarning(pmfwPath, false);
         return false;
     }, 'md');
 
@@ -11141,21 +11707,21 @@ function confirmFormatAllBeforeManualUpdate(elfPath) {
     if (confirmBtn) confirmBtn.textContent = '确认清空并继续';
 }
 
-function continueManualUpdateAfterDataWarning(elfPath, preserveUserData) {
+function continueManualUpdateAfterDataWarning(pmfwPath, preserveUserData) {
 
     if (serialConnected) {
-        confirmEnterUpgradeModeBeforeManualUpdate(elfPath, preserveUserData);
+        confirmEnterUpgradeModeBeforeManualUpdate(pmfwPath, preserveUserData);
         return;
     }
 
-    startManualUpdateTask(elfPath, preserveUserData, false);
+    startManualUpdateTask(pmfwPath, preserveUserData, false);
 }
 
-function confirmEnterUpgradeModeBeforeManualUpdate(elfPath, preserveUserData) {
+function confirmEnterUpgradeModeBeforeManualUpdate(pmfwPath, preserveUserData) {
     showModal('确认进入烧录模式', `
         <div style="line-height:1.7;">
             <div>当前设备仍处于正常连接状态，需要先重启到烧录模式。</div>
-            <div style="margin-top:10px;color:var(--text-secondary);">点击“继续”后，上位机会先退出设备屏全屏并恢复原窗口位置，然后打开烧录日志并发送进入烧录模式指令。</div>
+            <div style="margin-top:10px;color:var(--text-secondary);">点击“继续”后，上位机会先退出设备屏全屏并恢复原窗口位置，然后发送进入烧录模式指令。</div>
         </div>
     `, () => {
         const confirmBtn = document.getElementById('modalConfirm');
@@ -11172,7 +11738,7 @@ function confirmEnterUpgradeModeBeforeManualUpdate(elfPath, preserveUserData) {
             fullscreenActive = false;
             updateFullscreenButtonState(false);
             closeMainModal();
-            startManualUpdateTask(elfPath, preserveUserData, true);
+            startManualUpdateTask(pmfwPath, preserveUserData, true);
         });
         return false;
     }, 'md');
@@ -11181,185 +11747,196 @@ function confirmEnterUpgradeModeBeforeManualUpdate(elfPath, preserveUserData) {
     if (confirmBtn) confirmBtn.textContent = '继续';
 }
 
-function startManualUpdateTask(elfPath, preserveUserData, enterUpgradeConfirmed) {
+function startManualUpdateTask(pmfwPath, preserveUserData, enterUpgradeConfirmed) {
     const btn = document.getElementById('manualUpdateBtn');
+    setManualUpdateButtonBusy(true);
+    resetManualUpdateProgress(preserveUserData);
+    renderManualUpdateProgress(
+        0,
+        enterUpgradeConfirmed ? '正在请求设备进入烧录模式...' : '正在准备固件和设备...',
+        'running');
 
-    // 打开日志 Modal
-    openUpdateLogModal();
-    appendManualUpdateLog('[System] 开始手动更新...');
-    appendManualUpdateLog('[System] 固件路径: ' + elfPath);
-    appendManualUpdateLog('[System] 保留用户数据: ' + (preserveUserData ? '是' : '否'));
-    if (enterUpgradeConfirmed) {
-        appendManualUpdateLog('[System] 用户已确认进入烧录模式，准备发送重启指令...');
-    }
-
-    // 禁用按钮
-    if (btn) {
-        btn.disabled = true;
-        btn.style.opacity = '0.5';
-    }
-
-    // 更新状态（添加提示信息）
-    updateLogModalStatus('running', '更新时间较久，请耐心等待...');
-
-    // 发送请求到后端 (使用 system 模块确保发送到上位机)
-    sendMessage('system', 'manualUpdate', { path: elfPath, preserveUserData, enterUpgradeConfirmed }, (response) => {
+    sendMessage('system', 'manualUpdate', { path: pmfwPath, preserveUserData, enterUpgradeConfirmed }, (response) => {
         if (response.code !== 0) {
-            appendManualUpdateLog(`[Error] ${response.msg || '启动更新失败'}`);
-            updateLogModalStatus('error', '启动失败');
-            if (btn) {
-                btn.disabled = false;
-                btn.style.opacity = '1';
-            }
-            enableLogModalCloseBtn();
-        } else {
-            appendManualUpdateLog('[System] 更新任务已启动');
+            const message = localizeManualUpdateError(response.msg);
+            renderManualUpdateProgress(0, message, 'error');
+            finishManualUpdateProgress();
+            setManualUpdateButtonBusy(false);
+            showToast(message, 3000);
         }
     });
 }
 
-/**
- * 打开日志 Modal (使用与 showModal 一致的 .active 类模式)
- */
-function openUpdateLogModal() {
-    const modal = document.getElementById('updateLogModal');
-    const logContent = document.getElementById('manualUpdateLogContent');
-    const closeBtn = document.getElementById('updateLogCloseBtn');
+const manualUpdateStageLabels = {
+    OpeningPackage: '正在打开并验证 PMFW',
+    PackageValidated: 'PMFW 验证通过',
+    CapturingDeviceBaseline: '正在采集设备基线',
+    RequestingUpgradeMode: '正在请求设备进入烧录模式',
+    WaitingForDevice: '正在等待下载态设备',
+    OpeningDevice: '正在等待并打开下载态设备',
+    UploadingLoader: '正在上传并启动设备加载程序',
+    NegotiatingSession: '正在建立加密下载会话',
+    QueryingDevice: '正在读取芯片和闪存信息',
+    ScanningPrivateData: '正在扫描用户数据区',
+    ErasingFlash: '正在擦除完整 Flash',
+    ProgrammingFlash: '正在比较并写入固件扇区',
+    VerifyingFlash: '正在执行完整 Flash CRC 校验',
+    ResettingDevice: '正在复位设备',
+    WaitingForNormalMode: '正在等待正常模式稳定重枚举',
+    Completed: '固件下载完成'
+};
+const manualUpdateStageOrder = [
+    'OpeningPackage',
+    'PackageValidated',
+    'CapturingDeviceBaseline',
+    'RequestingUpgradeMode',
+    'WaitingForDevice',
+    'OpeningDevice',
+    'UploadingLoader',
+    'NegotiatingSession',
+    'QueryingDevice',
+    'ScanningPrivateData',
+    'ErasingFlash',
+    'ProgrammingFlash',
+    'VerifyingFlash',
+    'ResettingDevice',
+    'WaitingForNormalMode',
+    'Completed'
+];
+let manualUpdateLastPercent = 0;
+let manualUpdateStartedAt = 0;
+let manualUpdateElapsedTimer = null;
 
-    if (modal) {
-        modal.classList.add('active');
-        if (logContent) logContent.innerHTML = '';
-        if (closeBtn) closeBtn.disabled = true;
-    }
+function resetManualUpdateProgress(preserveUserData) {
+    manualUpdateStartedAt = Date.now();
+    const mode = document.getElementById('manualUpdateProgressMode');
+    if (mode) mode.textContent = preserveUserData ? '保留用户数据' : '完整擦除 16 MiB';
+    updateManualUpdateElapsed();
+    if (manualUpdateElapsedTimer) clearInterval(manualUpdateElapsedTimer);
+    manualUpdateElapsedTimer = setInterval(updateManualUpdateElapsed, 1000);
 }
 
-/**
- * 关闭日志 Modal
- */
-function closeUpdateLogModal() {
-    const modal = document.getElementById('updateLogModal');
-    if (modal) {
-        modal.classList.remove('active');
+function finishManualUpdateProgress() {
+    if (manualUpdateElapsedTimer) {
+        clearInterval(manualUpdateElapsedTimer);
+        manualUpdateElapsedTimer = null;
     }
+    updateManualUpdateElapsed();
 }
 
-/**
- * 更新日志 Modal 状态
- */
-function updateLogModalStatus(status, text) {
-    const statusEl = document.getElementById('updateLogStatus');
-    if (statusEl) {
-        statusEl.textContent = text;
-        statusEl.className = 'update-log-status';
-        if (status) {
-            statusEl.classList.add('status-' + status);
-        }
-    }
+function updateManualUpdateElapsed() {
+    const elapsed = document.getElementById('manualUpdateProgressElapsed');
+    if (!elapsed || !manualUpdateStartedAt) return;
+    const seconds = Math.max(0, Math.floor((Date.now() - manualUpdateStartedAt) / 1000));
+    const minutes = Math.floor(seconds / 60);
+    elapsed.textContent = `耗时 ${String(minutes).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
 }
 
-/**
- * 启用关闭按钮
- */
-function enableLogModalCloseBtn() {
-    const closeBtn = document.getElementById('updateLogCloseBtn');
-    if (closeBtn) {
-        closeBtn.disabled = false;
-    }
+function setManualUpdateButtonBusy(busy) {
+    const btn = document.getElementById('manualUpdateBtn');
+    if (!btn) return;
+    btn.disabled = busy;
+    btn.style.opacity = busy ? '0.55' : '1';
 }
 
-/**
- * 添加手动更新日志
- */
-function appendManualUpdateLog(text) {
-    const logContent = document.getElementById('manualUpdateLogContent');
-    if (!logContent) return;
-
-    const line = document.createElement('div');
-    line.className = 'log-line';
-
-    // 根据日志类型添加不同样式类
-    if (text.includes('[Error]') || text.includes('✗')) {
-        line.classList.add('log-error');
-    } else if (text.includes('[Warning]')) {
-        line.classList.add('log-warning');
-    } else if (text.includes('[System]') || text.includes('✓')) {
-        line.classList.add('log-system');
-    } else if (text.startsWith('>')) {
-        line.classList.add('log-command');
+function renderManualUpdateProgress(percent, message, state = 'running') {
+    const progress = document.getElementById('manualUpdateProgress');
+    const warning = document.getElementById('manualUpdateWarning');
+    const fill = document.getElementById('manualUpdateProgressFill');
+    const text = document.getElementById('manualUpdateProgressText');
+    const details = document.getElementById('manualUpdateProgressDetails');
+    const value = Math.max(0, Math.min(100, Number(percent) || 0));
+    manualUpdateLastPercent = value;
+    if (warning) warning.hidden = true;
+    if (progress) {
+        progress.hidden = false;
+        progress.dataset.state = state;
     }
-
-    line.textContent = text;
-    logContent.appendChild(line);
-    logContent.scrollTop = logContent.scrollHeight;
+    if (fill) fill.style.width = `${value}%`;
+    if (text) text.textContent = `${value}%`;
+    if (details) details.textContent = message || '处理中...';
 }
 
-/**
- * 复制更新日志到剪贴板
- */
-function copyUpdateLog() {
-    const logContent = document.getElementById('manualUpdateLogContent');
-    if (logContent) {
-        // 获取所有日志行的文本
-        const lines = logContent.querySelectorAll('.log-line');
-        const text = Array.from(lines).map(line => line.textContent).join('\n');
-
-        if (text) {
-            navigator.clipboard.writeText(text).then(() => {
-                showToast('日志已复制到剪贴板');
-            }).catch(err => {
-                console.error('复制失败:', err);
-                showToast('复制失败');
-            });
-        } else {
-            showToast('没有日志可复制');
-        }
+function formatManualUpdateUnits(stage, completedUnits, totalUnits) {
+    const index = manualUpdateStageOrder.indexOf(stage);
+    const stageProgress = index >= 0 ? `阶段 ${index + 1}/${manualUpdateStageOrder.length}` : `阶段 ${stage || '未知'}`;
+    if (!Number.isFinite(completedUnits) || !Number.isFinite(totalUnits) || totalUnits <= 0) {
+        return stageProgress;
     }
+    if (stage === 'UploadingLoader') {
+        return `${stageProgress} · Loader ${completedUnits.toLocaleString()}/${totalUnits.toLocaleString()} 字节`;
+    }
+    if (stage === 'WaitingForNormalMode') {
+        return `${stageProgress} · 稳定样本 ${completedUnits}/${totalUnits}`;
+    }
+    const sectorStages = ['ScanningPrivateData', 'ErasingFlash', 'ProgrammingFlash', 'VerifyingFlash'];
+    if (sectorStages.includes(stage)) {
+        return `${stageProgress} · 扇区 ${completedUnits.toLocaleString()}/${totalUnits.toLocaleString()}`;
+    }
+    return `${stageProgress} · ${completedUnits.toLocaleString()}/${totalUnits.toLocaleString()}`;
+}
+
+function handleManualUpdateProgress(data) {
+    const stage = String(data.stage || '');
+    const stageLabel = manualUpdateStageLabels[stage] || '正在处理固件更新';
+    const completedUnits = Number(data.completedUnits);
+    const totalUnits = Number(data.totalUnits);
+    const stageElement = document.getElementById('manualUpdateProgressStage');
+    const unitsElement = document.getElementById('manualUpdateProgressUnits');
+    if (stageElement) stageElement.textContent = stageLabel;
+    if (unitsElement) unitsElement.textContent = formatManualUpdateUnits(stage, completedUnits, totalUnits);
+    renderManualUpdateProgress(data.percent, data.message || stageLabel, stage === 'Completed' ? 'success' : 'running');
+}
+
+function localizeManualUpdateError(error) {
+    const raw = String(error || '');
+    console.error('[ManualUpdate] 原始错误:', raw);
+    if (/journal.*already completed/i.test(raw)) return '上次烧录记录已完成，请重新开始烧录';
+    if (/another firmware update|recovery lease|already running/i.test(raw)) return '已有固件更新任务正在运行';
+    if (/timeout|timed out|within 45 seconds/i.test(raw)) return '等待设备响应超时，请检查 USB 连接后重试';
+    if (/pmfw|package/i.test(raw)) return 'PMFW 固件包无效或无法读取';
+    if (/sha|hash|allowlist|signature|trusted/i.test(raw)) return '固件或设备加载程序完整性校验失败';
+    if (/flash|sector|crc|verification/i.test(raw)) return '闪存写入或校验失败，请重新进入烧录模式后重试';
+    if (/loader/i.test(raw)) return '设备加载程序启动失败，请重新连接设备后重试';
+    if (/device|wl82|usb|scsi|storage/i.test(raw)) return '未找到可用的下载态设备，请检查 USB 连接后重试';
+    return '固件烧录失败，请检查设备连接和固件包后重试';
 }
 
 /**
  * 处理手动更新事件 (WebSocket事件)
  */
 function handleManualUpdateEvent(eventType, data) {
-    if (eventType === 'log' && data.text) {
-        appendManualUpdateLog(data.text);
-    } else if (eventType === 'event') {
-        const btn = document.getElementById('manualUpdateBtn');
-        if (data.status === 'confirm_enter_upgrade') {
-            handleManualUpdateConfirmation(data, 'enter_upgrade');
-            return;
-        }
-        if (data.status === 'confirm_upgrade_ready') {
-            handleManualUpdateConfirmation(data, 'upgrade_ready');
-            return;
-        }
-        if (data.status === 'success') {
-            appendManualUpdateLog('[System] ✓ 固件烧录成功！');
-            showToast('固件烧录成功', 3000);
-            updateLogModalStatus('success', '烧录成功');
-            btn.disabled = false;
-            btn.style.opacity = '1';
-            enableLogModalCloseBtn();
-        } else if (data.status === 'error') {
-            appendManualUpdateLog(`[Error] ✗ 烧录失败: ${data.error || '未知错误'}`);
-            showToast('固件烧录失败', 3000);
-            updateLogModalStatus('error', '烧录失败');
-            btn.disabled = false;
-            btn.style.opacity = '1';
-            enableLogModalCloseBtn();
-        }
+    if (eventType !== 'event' || !data) return;
+    if (data.status === 'confirm_enter_upgrade') {
+        handleManualUpdateConfirmation(data);
+        return;
+    }
+    if (data.status === 'success') {
+        renderManualUpdateProgress(100, '固件写入、校验和正常态启动均已完成', 'success');
+        finishManualUpdateProgress();
+        setManualUpdateButtonBusy(false);
+        showToast('固件烧录成功', 3000);
+    } else if (data.status === 'error') {
+        renderManualUpdateProgress(manualUpdateLastPercent, localizeManualUpdateError(data.error), 'error');
+        finishManualUpdateProgress();
+        setManualUpdateButtonBusy(false);
+        showToast('固件烧录失败', 3000);
     }
 }
 
-function handleManualUpdateConfirmation(data, stage) {
+function handleManualUpdateConfirmation(data) {
     const requestId = data?.requestId;
     if (!requestId) {
-        appendManualUpdateLog('[Error] 缺少烧录确认ID');
+        renderManualUpdateProgress(manualUpdateLastPercent, '缺少烧录确认 ID', 'error');
+        finishManualUpdateProgress();
+        setManualUpdateButtonBusy(false);
         return;
     }
 
-    const isEnterUpgrade = stage === 'enter_upgrade';
-    appendManualUpdateLog(isEnterUpgrade ? '[System] 等待用户确认进入烧录模式...' : '[System] 等待用户确认设备已进入烧录模式...');
-    updateLogModalStatus('running', isEnterUpgrade ? '等待确认进入烧录模式' : '等待确认设备已进入烧录模式');
+    renderManualUpdateProgress(
+        manualUpdateLastPercent,
+        '等待确认进入烧录模式',
+        'waiting');
 
     let responded = false;
     const respond = (ok) => {
@@ -11367,42 +11944,30 @@ function handleManualUpdateConfirmation(data, stage) {
         responded = true;
         sendMessage('system', 'manualUpdateBootConfirm', { requestId, continue: ok }, (resp) => {
             if (!resp || resp.code !== 0) {
-                appendManualUpdateLog(`[Error] 确认响应失败: ${resp?.msg || '未知错误'}`);
+                renderManualUpdateProgress(manualUpdateLastPercent, '烧录确认响应失败，请重新开始', 'error');
+                finishManualUpdateProgress();
+                setManualUpdateButtonBusy(false);
             }
         });
     };
 
-    const title = isEnterUpgrade ? '确认进入烧录模式' : '确认设备已进入烧录模式';
-    const content = isEnterUpgrade ? `
+    const title = '确认进入烧录模式';
+    const content = `
         <div style="line-height:1.7;">
             <div>设备即将重启到烧录模式，屏幕可能会短暂黑屏或断开连接。</div>
             <div style="margin-top:10px;color:var(--text-secondary);">点击“继续”后，上位机会先退出设备屏全屏并恢复原窗口位置，再发送重启到烧录模式指令。</div>
         </div>
-    ` : `
-        <div style="line-height:1.7;">
-            <div>请确认设备已经重启并进入烧录模式。</div>
-            <div style="margin-top:10px;color:var(--text-secondary);">点击“开始烧录”后，上位机会立即启动固件写入工具。</div>
-        </div>
     `;
 
     showModal(title, content, () => {
-        if (!isEnterUpgrade) {
-            appendManualUpdateLog('[System] 用户确认设备已进入烧录模式，开始烧录...');
-            updateLogModalStatus('running', '开始烧录');
-            respond(true);
-            return;
-        }
-
-        appendManualUpdateLog('[System] 用户确认进入烧录模式，正在恢复主窗口...');
-        updateLogModalStatus('running', '正在退出全屏并恢复窗口');
+        renderManualUpdateProgress(manualUpdateLastPercent, '正在恢复主窗口并重启设备...', 'running');
         sendMessage('system', 'restoreFromDeviceScreen', {}, (restoreResp) => {
             if (restoreResp && restoreResp.code !== 0) {
-                appendManualUpdateLog(`[Warning] 恢复窗口失败: ${restoreResp.msg || '未知错误'}，仍继续进入烧录模式`);
-            } else {
-                appendManualUpdateLog('[System] 主窗口已恢复，继续进入烧录模式');
+                console.warn('[ManualUpdate] 恢复窗口失败，仍继续进入烧录模式:', restoreResp.msg || restoreResp);
             }
             fullscreenActive = false;
             updateFullscreenButtonState(false);
+            renderManualUpdateProgress(manualUpdateLastPercent, '正在请求设备进入烧录模式...', 'running');
             respond(true);
         });
     }, 'md');
@@ -11410,10 +11975,11 @@ function handleManualUpdateConfirmation(data, stage) {
     const confirmBtn = document.getElementById('modalConfirm');
     const cancelBtn = document.getElementById('modalCancel');
     const closeBtn = document.getElementById('modalClose');
-    if (confirmBtn) confirmBtn.textContent = isEnterUpgrade ? '继续' : '开始烧录';
+    if (confirmBtn) confirmBtn.textContent = '继续';
     const cancel = () => {
-        appendManualUpdateLog(isEnterUpgrade ? '[System] 用户取消进入烧录模式' : '[System] 用户取消开始烧录');
-        updateLogModalStatus('error', '已取消');
+        renderManualUpdateProgress(manualUpdateLastPercent, '已取消固件烧录', 'error');
+        finishManualUpdateProgress();
+        setManualUpdateButtonBusy(false);
         respond(false);
         closeMainModal();
     };
@@ -11632,17 +12198,6 @@ function rk628IsVSyncPositive(flags) {
     return (Number(flags) & DRM_MODE_FLAG_PVSYNC) !== 0;
 }
 
-function updateSrcFlags() {
-    const hPositive = document.getElementById('src-hsync-positive')?.checked;
-    const vPositive = document.getElementById('src-vsync-positive')?.checked;
-    const out = document.getElementById('src-flags');
-    if (out) out.value = String(rk628BuildSyncFlags(!!hPositive, !!vPositive));
-}
-
-function initSrcFlagsListeners() {
-    document.getElementById('src-hsync-positive')?.addEventListener('change', updateSrcFlags);
-    document.getElementById('src-vsync-positive')?.addEventListener('change', updateSrcFlags);
-}
 /**
  * 发送RK628配置命令（Promise封装）
  */
@@ -11675,6 +12230,147 @@ function sendRK628CommandWithTimeout(action, data = null, timeoutMs = 30000) {
                 reject(response);
             }
         });
+    });
+}
+
+const RK628_SCALE_MODE_FULLSCREEN = 0;
+const RK628_SCALE_MODE_ASPECT_FIT = 1;
+let rk628ScaleModeState = {
+    mode: RK628_SCALE_MODE_ASPECT_FIT,
+    inFlight: false,
+    applySeq: null,
+};
+
+function rk628ScaleModeNormalize(value) {
+    return Number(value) === RK628_SCALE_MODE_FULLSCREEN
+        ? RK628_SCALE_MODE_FULLSCREEN
+        : RK628_SCALE_MODE_ASPECT_FIT;
+}
+
+function rk628ScaleModeRender() {
+    const select = document.getElementById('displayScaleModeSelect');
+    if (!select) return;
+    select.value = String(rk628ScaleModeState.mode);
+    select.disabled = rk628ScaleModeState.inFlight;
+}
+
+function rk628ScaleModeReadState(data) {
+    const rawMode = data?.scale_mode;
+    if (!Number.isFinite(Number(rawMode)) ||
+        ![RK628_SCALE_MODE_FULLSCREEN, RK628_SCALE_MODE_ASPECT_FIT].includes(Number(rawMode))) {
+        const error = new Error('当前下位机固件不支持显示缩放设置');
+        error.unsupported = true;
+        throw error;
+    }
+
+    const hasApplyStatus = ['scale_apply_seq', 'scale_applied_mode',
+        'scale_apply_result', 'scale_persist_result', 'scale_reapply_result']
+        .every(key => Object.prototype.hasOwnProperty.call(data || {}, key));
+    const rawSeq = Number(data?.scale_apply_seq);
+    return {
+        mode: Number(rawMode),
+        hasApplyStatus,
+        applySeq: hasApplyStatus && Number.isFinite(rawSeq) ? rawSeq : null,
+        appliedMode: hasApplyStatus ? Number(data.scale_applied_mode) : null,
+        applyResult: hasApplyStatus ? Number(data.scale_apply_result) : null,
+        persistResult: hasApplyStatus ? Number(data.scale_persist_result) : null,
+        reapplyResult: hasApplyStatus ? Number(data.scale_reapply_result) : null,
+    };
+}
+
+async function rk628ScaleModeWaitForApply(targetMode, previousSeq) {
+    for (let attempt = 0; attempt < 12; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 150));
+        const result = await sendRK628CommandWithTimeout(10, null, 5000);
+        const state = rk628ScaleModeReadState(result?.data);
+        rk628ScaleModeState.applySeq = state.applySeq;
+
+        const completed = state.mode === targetMode && (
+            state.hasApplyStatus
+                ? state.applySeq !== null && state.applySeq !== previousSeq &&
+                    state.appliedMode === targetMode
+                : true
+        );
+        if (!completed) continue;
+        if (state.applyResult !== 0) {
+            throw new Error(`下位机应用缩放参数失败 (${state.applyResult})`);
+        }
+        if (state.persistResult !== 0) {
+            throw new Error(`缩放参数已应用但持久化失败 (${state.persistResult})`);
+        }
+        if (state.reapplyResult !== 0) {
+            throw new Error(`缩放参数已保存但显示重配置失败 (${state.reapplyResult})`);
+        }
+        return state.hasApplyStatus;
+    }
+    throw new Error('下位机未在超时时间内确认缩放设置');
+}
+
+async function rk628ScaleModeLoad(silent = false) {
+    if (rk628ScaleModeState.inFlight) return;
+    rk628ScaleModeState.inFlight = true;
+    rk628ScaleModeRender();
+    try {
+        const result = await sendRK628CommandWithTimeout(10, null, 5000);
+        const state = rk628ScaleModeReadState(result?.data);
+        rk628ScaleModeState.mode = state.mode;
+        rk628ScaleModeState.applySeq = state.applySeq;
+    } catch (error) {
+        if (error?.unsupported) {
+            showToast(rk628ExtractErrorMessage(error), 'error');
+        } else if (!silent) {
+            showToast('读取缩放规则失败: ' + rk628ExtractErrorMessage(error), 'error');
+        }
+    } finally {
+        rk628ScaleModeState.inFlight = false;
+        rk628ScaleModeRender();
+    }
+}
+
+async function rk628ScaleModeSave(mode) {
+    if (rk628ScaleModeState.inFlight) return;
+    const previousMode = rk628ScaleModeState.mode;
+    rk628ScaleModeState.mode = rk628ScaleModeNormalize(mode);
+    rk628ScaleModeState.inFlight = true;
+    rk628ScaleModeRender();
+    try {
+        // The device sequence restarts at zero after reboot. Always establish
+        // a fresh baseline so an old UI cache cannot collide with the new seq.
+        const baselineResult = await sendRK628CommandWithTimeout(10, null, 5000);
+        const baseline = rk628ScaleModeReadState(baselineResult?.data);
+        const previousSeq = baseline.applySeq;
+        rk628ScaleModeState.applySeq = baseline.applySeq;
+        await sendRK628CommandWithTimeout(24, {
+            name: 'scale_mode',
+            value: rk628ScaleModeState.mode,
+            persist: 1,
+            restart: 0,
+        }, 6000);
+        const fullyConfirmed = await rk628ScaleModeWaitForApply(
+            rk628ScaleModeState.mode, previousSeq);
+        if (fullyConfirmed) {
+            showToast(rk628ScaleModeState.mode === RK628_SCALE_MODE_FULLSCREEN
+                ? '已切换为全屏拉伸'
+                : '已切换为等比缩放', 'success');
+        } else {
+            showToast('已回读到目标缩放值，但当前固件无法确认持久化和显示重配置结果', 'warning');
+        }
+    } catch (error) {
+        rk628ScaleModeState.mode = previousMode;
+        showToast('保存缩放规则失败: ' + rk628ExtractErrorMessage(error), 'error');
+    } finally {
+        rk628ScaleModeState.inFlight = false;
+        rk628ScaleModeRender();
+    }
+}
+
+function initRk628ScaleModeSetting() {
+    const select = document.getElementById('displayScaleModeSelect');
+    if (!select || select.dataset.bound === '1') return;
+    select.dataset.bound = '1';
+    rk628ScaleModeRender();
+    select.addEventListener('change', (event) => {
+        rk628ScaleModeSave(event.target.value);
     });
 }
 
@@ -11713,22 +12409,15 @@ function switchRK628Tab(tabName) {
         content.classList.remove('active');
     });
 
-    const quickTab = (tabName === 'edid-modes' || tabName === 'edid-tuning');
+    const quickTab = tabName === 'edid-tuning';
     const contentId = quickTab ? 'tab-edid-quick' : ('tab-' + tabName);
     document.getElementById(contentId).classList.add('active');
 
     // 快速切换页改为事件驱动：不轮询下位机状态
     if (quickTab) {
-        try { switchRK628QuickView(tabName === 'edid-tuning' ? 'tuning' : 'modes'); } catch (e) { /* ignore */ }
-        try {
-            container.querySelectorAll('#tab-edid-quick details').forEach((panel) => {
-                panel.open = false;
-            });
-        } catch (e) { /* ignore */ }
-        try { rk628QuickRenderModes(); } catch (e) { /* ignore */ }
-        try { rk628QuickRefreshCustomDraft(); } catch (e) { /* ignore */ }
-        // 单次读取当前调参状态（不轮询）
+        try { switchRK628QuickView('tuning'); } catch (e) { /* ignore */ }
         try { rk628QuickPpLoad(); } catch (e) { /* ignore */ }
+        try { rk628QuickPowerLoad(); } catch (e) { /* ignore */ }
     }
 
     // 实时配置：切换到页面时自动从下位机读取寄存器对应参数
@@ -11760,68 +12449,10 @@ async function loadRK628Config() {
         const result = await sendRK628CommandWithTimeout(1, null, 12000); // action=1: 获取所有配置
         rk628ConfigData = result.data;
 
-        // 填充源模式表单（转换为可视化界面格式）
-        const src = result.data.src_mode;
-        const srcHsyncLen = src.hsync_end - src.hsync_start;
-        const srcHfront = src.hsync_start - src.hdisplay;
-        const srcHback = src.htotal - src.hsync_end;
-
-        const srcVsyncLen = src.vsync_end - src.vsync_start;
-        const srcVfront = src.vsync_start - src.vdisplay;
-        const srcVback = src.vtotal - src.vsync_end;
-
-        document.getElementById('src-hsync-len').value = srcHsyncLen;
-        document.getElementById('src-hback').value = srcHback;
-        document.getElementById('src-hdisplay').value = src.hdisplay;
-        document.getElementById('src-hfront').value = srcHfront;
-
-        document.getElementById('src-vsync-len').value = srcVsyncLen;
-        document.getElementById('src-vback').value = srcVback;
-        document.getElementById('src-vdisplay').value = src.vdisplay;
-        document.getElementById('src-vfront').value = srcVfront;
-
-        document.getElementById('src-fps').value = 60; // 默认刷新率
-        document.getElementById('src-flags').value = src.flags;
-        document.getElementById('src-hsync-positive').checked = rk628IsHSyncPositive(src.flags);
-        document.getElementById('src-vsync-positive').checked = rk628IsVSyncPositive(src.flags);
-
-        // 更新src时序显示
-        updateSrcTiming();
-
-        // 填充目标模式（若旧版 tab-dst-mode 不存在，则回填到“屏幕输出(实时配置)”面板）
+        // 使用 Flash dst_mode 作为“屏幕输出(实时配置)”面板的初始值
         const dst = result.data.dst_mode;
         try {
-            if (document.getElementById('dst-hsync-len')) {
-                const dstHsyncLen = dst.hsync_end - dst.hsync_start;
-                const dstHfront = dst.hsync_start - dst.hdisplay;
-                const dstHback = dst.htotal - dst.hsync_end;
-
-                const dstVsyncLen = dst.vsync_end - dst.vsync_start;
-                const dstVfront = dst.vsync_start - dst.vdisplay;
-                const dstVback = dst.vtotal - dst.vsync_end;
-
-                document.getElementById('dst-hsync-len').value = dstHsyncLen;
-                document.getElementById('dst-hback').value = dstHback;
-                document.getElementById('dst-hdisplay').value = dst.hdisplay;
-                document.getElementById('dst-hfront').value = dstHfront;
-
-                document.getElementById('dst-vsync-len').value = dstVsyncLen;
-                document.getElementById('dst-vback').value = dstVback;
-                document.getElementById('dst-vdisplay').value = dst.vdisplay;
-                document.getElementById('dst-vfront').value = dstVfront;
-
-                document.getElementById('dst-fps').value = 60; // 默认刷新率
-                document.getElementById('dst-flags').value = dst.flags;
-
-                // 设置 polarity 复选框
-                const dstHPositive = rk628IsHSyncPositive(dst.flags);
-                const dstVPositive = rk628IsVSyncPositive(dst.flags);
-                document.getElementById('dst-hsync-positive').checked = dstHPositive;
-                document.getElementById('dst-vsync-positive').checked = dstVPositive;
-
-                // 更新dst时序显示
-                updateDstTiming();
-            } else if (document.getElementById('rt-hsync-len')) {
+            if (document.getElementById('rt-hsync-len')) {
                 // Use flash dst_mode as an initial value; the user can still "从下位机读取" for runtime state.
                 rk628RtApplyModeToUi(dst, false);
             }
@@ -11830,15 +12461,8 @@ async function loadRK628Config() {
         }
 
         // 填充EDID
-        document.getElementById('edid-hex').value = result.data.edid;
+        document.getElementById('edid-hex').value = formatEdidHex(result.data.edid);
         updateEdidCharCount();
-
-        // 快速切换页：刷新显示并启动状态轮询（若固件未支持action=8将自动忽略）
-        try {
-            rk628QuickRenderModes();
-        } catch (e) {
-            // ignore
-        }
 
         showToast('配置加载成功', 'success');
     } catch (error) {
@@ -11846,121 +12470,108 @@ async function loadRK628Config() {
         showToast('配置加载失败: ' + rk628ExtractErrorMessage(error), 'error');
     }
 }
-/**
- * 渲染EDID Hex编辑器
- */
-function renderEdidHexEditor(hexString) {
-    const container = document.getElementById('edid-hex-display');
-    if (!container) return;
-
-    // 清空容器
-    container.innerHTML = '';
-
-    // 移除所有非十六进制字符
-    hexString = hexString.replace(/[^0-9a-fA-F]/g, '');
-
-    // 确保是偶数长度（每个字节2个字符）
-    if (hexString.length % 2 !== 0) {
-        hexString += '0';
+function formatEdidHex(hexString) {
+    const cleanHex = String(hexString || '').replace(/\s/g, '').toUpperCase();
+    if (!cleanHex) return '';
+    const bytes = cleanHex.match(/.{1,2}/g) || [];
+    const lines = [];
+    for (let i = 0; i < bytes.length; i += 16) {
+        lines.push(bytes.slice(i, i + 16).join(' '));
     }
-
-    // 转换为字节数组
-    const bytes = [];
-    for (let i = 0; i < hexString.length; i += 2) {
-        bytes.push(hexString.substr(i, 2).toUpperCase());
-    }
-
-    // 补齐到256字节
-    while (bytes.length < 256) {
-        bytes.push('00');
-    }
-
-    // 限制为256字节
-    bytes.splice(256);
-
-    // 按16字节一行渲染
-    for (let row = 0; row < 16; row++) {
-        const rowDiv = document.createElement('div');
-        rowDiv.className = 'hex-row';
-
-        // 偏移地址
-        const offset = document.createElement('div');
-        offset.className = 'hex-offset';
-        offset.textContent = (row * 16).toString(16).toUpperCase().padStart(4, '0');
-        rowDiv.appendChild(offset);
-
-        // 16个字节
-        const bytesDiv = document.createElement('div');
-        bytesDiv.className = 'hex-bytes';
-        let asciiString = '';
-
-        for (let col = 0; col < 16; col++) {
-            const byteIndex = row * 16 + col;
-            const byteValue = bytes[byteIndex] || '00';
-
-            const byteSpan = document.createElement('span');
-            byteSpan.className = 'hex-byte';
-            if (byteValue === '00') {
-                byteSpan.classList.add('zero');
-            }
-            byteSpan.textContent = byteValue;
-            byteSpan.dataset.index = byteIndex;
-            bytesDiv.appendChild(byteSpan);
-
-            // 生成ASCII字符
-            const charCode = parseInt(byteValue, 16);
-            if (charCode >= 32 && charCode <= 126) {
-                asciiString += String.fromCharCode(charCode);
-            } else {
-                asciiString += '·';
-            }
-        }
-
-        rowDiv.appendChild(bytesDiv);
-
-        // ASCII列
-        const asciiDiv = document.createElement('div');
-        asciiDiv.className = 'hex-ascii';
-        for (let i = 0; i < asciiString.length; i++) {
-            const charSpan = document.createElement('span');
-            charSpan.className = asciiString[i] === '·' ? 'ascii-char ascii-unprintable' : 'ascii-char';
-            charSpan.textContent = asciiString[i];
-            asciiDiv.appendChild(charSpan);
-        }
-
-        rowDiv.appendChild(asciiDiv);
-        container.appendChild(rowDiv);
-    }
-
-    // 更新计数和状态
-    updateEdidStatus(bytes.length);
+    return lines.join('\n');
 }
 
-/**
- * 更新EDID状态
- */
-function updateEdidStatus(byteCount) {
+function parseEdidHex(hexText) {
+    const source = String(hexText || '');
+    const compact = source.replace(/\s/g, '');
+    const byteCount = Math.floor(compact.length / 2);
+    const result = {
+        valid: false,
+        byteCount,
+        cleanHex: compact.toLowerCase(),
+        bytes: null,
+        error: '未加载',
+        baseValid: false,
+        extensionValid: false,
+    };
+
+    if (!compact) return result;
+    if (/[^0-9a-fA-F]/.test(compact)) {
+        result.error = '包含非十六进制字符';
+        return result;
+    }
+    if (compact.length !== 512) {
+        result.error = `长度错误: ${byteCount}/256 字节`;
+        return result;
+    }
+
+    const bytes = new Uint8Array(256);
+    for (let i = 0; i < bytes.length; i++) {
+        bytes[i] = parseInt(compact.slice(i * 2, i * 2 + 2), 16);
+    }
+    result.bytes = bytes;
+
+    const header = [0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00];
+    if (!header.every((value, index) => bytes[index] === value)) {
+        result.error = 'EDID Header 无效';
+        return result;
+    }
+    if (bytes[0x7E] !== 1) {
+        result.error = '扩展块数量必须为 1';
+        return result;
+    }
+
+    const blockValid = (offset) => {
+        let sum = 0;
+        for (let i = offset; i < offset + 128; i++) sum = (sum + bytes[i]) & 0xFF;
+        return sum === 0;
+    };
+    result.baseValid = blockValid(0);
+    result.extensionValid = blockValid(128);
+    if (!result.baseValid || !result.extensionValid) {
+        result.error = !result.baseValid ? 'Base Checksum 无效' : 'Extension Checksum 无效';
+        return result;
+    }
+
+    result.valid = true;
+    result.error = '';
+    return result;
+}
+
+function updateEdidStatus(result) {
     const byteCountElem = document.getElementById('edid-byte-count');
     const statusElem = document.getElementById('edid-status');
+    const baseCheck = document.getElementById('edid-base-check');
+    const extensionCheck = document.getElementById('edid-extension-check');
+    const saveButton = document.getElementById('edid-save-button');
 
     if (byteCountElem) {
-        byteCountElem.textContent = byteCount;
+        byteCountElem.textContent = result.byteCount;
     }
 
     if (statusElem) {
         statusElem.classList.remove('valid', 'error');
         const statusText = statusElem.querySelector('span:last-child');
-
-        if (byteCount === 256) {
+        if (result.valid) {
             statusElem.classList.add('valid');
-            if (statusText) statusText.textContent = '有效';
-        } else if (byteCount === 0) {
+            if (statusText) statusText.textContent = 'EDID 有效';
+        } else if (result.byteCount === 0) {
             if (statusText) statusText.textContent = '未加载';
         } else {
             statusElem.classList.add('error');
-            if (statusText) statusText.textContent = `错误: ${byteCount}/256 字节`;
+            if (statusText) statusText.textContent = result.error;
         }
     }
+
+    const setBlockState = (element, label, valid) => {
+        if (!element) return;
+        element.classList.toggle('valid', valid);
+        element.classList.toggle('error', !!result.bytes && !valid);
+        element.textContent = `${label} ${valid ? 'OK' : '--'}`;
+    };
+    setBlockState(baseCheck, 'Base', result.baseValid);
+    setBlockState(extensionCheck, 'Extension', result.extensionValid);
+    if (saveButton) saveButton.disabled = !result.valid;
 }
 
 /**
@@ -11974,6 +12585,12 @@ function loadEdidFromFile(input) {
     reader.onload = function (e) {
         const arrayBuffer = e.target.result;
         const bytes = new Uint8Array(arrayBuffer);
+        input.value = '';
+
+        if (bytes.length !== 256) {
+            showToast(`EDID 文件必须为 256 字节，当前为 ${bytes.length} 字节`, 'error');
+            return;
+        }
 
         // 转换为十六进制字符串
         let hexString = '';
@@ -11982,10 +12599,8 @@ function loadEdidFromFile(input) {
         }
 
         // 更新隐藏的textarea
-        document.getElementById('edid-hex').value = hexString;
-
-        // 渲染hex编辑器
-        renderEdidHexEditor(hexString);
+        document.getElementById('edid-hex').value = formatEdidHex(hexString);
+        updateEdidCharCount();
 
         showToast(`已加载 EDID 文件: ${file.name} (${bytes.length} 字节)`, 'success');
     };
@@ -12001,23 +12616,14 @@ function loadEdidFromFile(input) {
  * 下载EDID文件
  */
 function downloadEdidFile() {
-    const hexString = document.getElementById('edid-hex').value;
-    if (!hexString || hexString.length === 0) {
-        showToast('没有可下载的EDID数据', 'error');
+    const result = parseEdidHex(document.getElementById('edid-hex').value);
+    if (!result.valid) {
+        showToast('无法导出: ' + result.error, 'error');
         return;
     }
 
-    // 移除所有非十六进制字符
-    const cleanHex = hexString.replace(/[^0-9a-fA-F]/g, '');
-
-    // 转换为字节数组
-    const bytes = [];
-    for (let i = 0; i < cleanHex.length; i += 2) {
-        bytes.push(parseInt(cleanHex.substr(i, 2), 16));
-    }
-
     // 创建Blob
-    const blob = new Blob([new Uint8Array(bytes)], { type: 'application/octet-stream' });
+    const blob = new Blob([result.bytes], { type: 'application/octet-stream' });
 
     // 创建下载链接
     const url = URL.createObjectURL(blob);
@@ -12029,7 +12635,7 @@ function downloadEdidFile() {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
 
-    showToast(`已下载 EDID 文件 (${bytes.length} 字节)`, 'success');
+    showToast('已导出 EDID 文件 (256 字节)', 'success');
 }
 
 /**
@@ -12039,8 +12645,8 @@ async function copyEdidHex() {
     const edidInput = document.getElementById('edid-hex');
     if (!edidInput) return;
 
-    const hexString = edidInput.value.replace(/\s/g, '');
-    if (!hexString) {
+    const result = parseEdidHex(edidInput.value);
+    if (!result.cleanHex) {
         showToast('没有可复制的EDID数据', 'error');
         return;
     }
@@ -12051,7 +12657,7 @@ async function copyEdidHex() {
     }
 
     try {
-        await navigator.clipboard.writeText(hexString);
+        await navigator.clipboard.writeText(formatEdidHex(result.cleanHex));
         showToast('已复制EDID HEX', 'success');
     } catch (error) {
         console.error('Copy EDID Hex error:', error);
@@ -12078,31 +12684,11 @@ async function pasteEdidHex() {
             return;
         }
 
-        let cleanHex = text.replace(/[^0-9a-fA-F]/g, '');
-        if (!cleanHex) {
-            showToast('未检测到有效的十六进制字符', 'error');
-            return;
-        }
-
-        const warnings = [];
-        if (cleanHex.length > 512) {
-            cleanHex = cleanHex.slice(0, 512);
-            warnings.push('已截断为512个十六进制字符');
-        }
-
-        if (cleanHex.length % 2 !== 0) {
-            cleanHex += '0';
-            warnings.push('已补齐末尾半字节');
-        }
-
-        edidInput.value = cleanHex;
-        renderEdidHexEditor(cleanHex);
-
-        const byteCount = Math.floor(cleanHex.length / 2);
-        const message = warnings.length
-            ? `已粘贴 ${byteCount} 字节（${warnings.join('，')}）`
-            : `已粘贴 ${byteCount} 字节`;
-        showToast(message, warnings.length ? 'warning' : 'success');
+        const result = parseEdidHex(text);
+        edidInput.value = result.valid ? formatEdidHex(result.cleanHex) : text;
+        updateEdidCharCount();
+        showToast(result.valid ? '已粘贴有效 EDID' : '已粘贴，请修正: ' + result.error,
+            result.valid ? 'success' : 'warning');
     } catch (error) {
         console.error('Paste EDID Hex error:', error);
         showToast('粘贴失败，请检查浏览器权限', 'error');
@@ -12117,7 +12703,7 @@ function clearEdidHex() {
     if (!edidInput) return;
 
     edidInput.value = '';
-    renderEdidHexEditor('');
+    updateEdidCharCount();
     showToast('已清空EDID数据', 'success');
 }
 
@@ -12125,474 +12711,57 @@ function clearEdidHex() {
  * 更新EDID字符计数（兼容旧代码）
  */
 function updateEdidCharCount() {
-    const edidHex = document.getElementById('edid-hex').value;
-    renderEdidHexEditor(edidHex);
+    const edidHex = document.getElementById('edid-hex')?.value || '';
+    updateEdidStatus(parseEdidHex(edidHex));
 }
 
 // 页面加载时初始化EDID编辑器
 document.addEventListener('DOMContentLoaded', function () {
     const edidInput = document.getElementById('edid-hex');
     if (edidInput) {
-        // 始终渲染hex编辑器，没有数据时显示空的256字节占位符
-        renderEdidHexEditor(edidInput.value || '');
+        updateEdidCharCount();
     }
-    try { rk628QuickResetCustomForm(); } catch (e) { /* ignore */ }
 });
-/**
- * 保存RK628配置
- */
-async function saveRK628Config() {
-    try {
-        // 收集源模式数据
-        updateSrcFlags();
-        const srcMode = {
-            clock: parseInt(document.getElementById('src-clock').value),
-            hdisplay: parseInt(document.getElementById('src-hdisplay').value),
-            hsync_start: parseInt(document.getElementById('src-hsync-start').value),
-            hsync_end: parseInt(document.getElementById('src-hsync-end').value),
-            htotal: parseInt(document.getElementById('src-htotal').value),
-            vdisplay: parseInt(document.getElementById('src-vdisplay').value),
-            vsync_start: parseInt(document.getElementById('src-vsync-start').value),
-            vsync_end: parseInt(document.getElementById('src-vsync-end').value),
-            vtotal: parseInt(document.getElementById('src-vtotal').value),
-            flags: parseInt(document.getElementById('src-flags').value)
-        };
-        // 收集目标模式数据
-        const dstMode = {
-            clock: parseInt(document.getElementById('dst-clock').value),
-            hdisplay: parseInt(document.getElementById('dst-hdisplay').value),
-            hsync_start: parseInt(document.getElementById('dst-hsync-start').value),
-            hsync_end: parseInt(document.getElementById('dst-hsync-end').value),
-            htotal: parseInt(document.getElementById('dst-htotal').value),
-            vdisplay: parseInt(document.getElementById('dst-vdisplay').value),
-            vsync_start: parseInt(document.getElementById('dst-vsync-start').value),
-            vsync_end: parseInt(document.getElementById('dst-vsync-end').value),
-            vtotal: parseInt(document.getElementById('dst-vtotal').value),
-            flags: parseInt(document.getElementById('dst-flags').value)
-        };
-        // 收集EDID数据
-        const edidHex = document.getElementById('edid-hex').value.replace(/\s/g, '');
-        if (edidHex.length !== 512) {
-            showToast('EDID必须是512个十六进制字符', 'error');
-            return;
-        }
-        // 验证EDID是否为有效的十六进制
-        if (!/^[0-9a-fA-F]{512}$/.test(edidHex)) {
-            showToast('EDID包含无效字符，请只使用0-9和a-f', 'error');
-            return;
-        }
-        // 保存源模式
-        await sendRK628Command(2, srcMode); // action=2: 保存源模式
-        // 保存目标模式
-        await sendRK628Command(3, dstMode); // action=3: 保存目标模式
-        // 保存EDID
-        await sendRK628Command(4, { edid: edidHex }); // action=4: 保存EDID
-        showToast('所有配置保存成功！', 'success');
-    } catch (error) {
-        console.error('Save RK628 config error:', error);
-        showToast('保存配置失败', 'error');
-    }
-}
-/**
- * 重置RK628配置为默认值
- */
-async function resetRK628ToDefault() {
-    confirmModal('确定要恢复所有配置为默认值吗？此操作不可撤销！', async () => {
-        try {
-            await sendRK628Command(5); // action=5: 恢复默认配置
-            showToast('配置已恢复为默认值', 'success');
-            // 重新加载配置
-            setTimeout(() => loadRK628Config(), 500);
-        } catch (error) {
-            console.error('Reset RK628 config error:', error);
-            showToast('恢复默认值失败: ' + (error.msg || 'error'));
-        }
-    }, '恢复默认');
-}
-/**
- * 应用RK628配置（重新加载）
- */
-async function applyRK628Config() {
-    try {
-        await sendRK628Command(6); // action=6: 应用配置
-        showToast('配置已应用，请重启设备使配置生效', 'success');
-    } catch (error) {
-        console.error('Apply RK628 config error:', error);
-        showToast('应用配置失败: ' + (error.msg || 'error'));
-    }
-}
 // 当打开RK628配置页面时自动加载配置
 const originalOpenPage = window.openPage;
 const originalClosePage = window.closePage;
 /**
- * 保存并应用HDMI输入配置
- */
-async function applySrcConfig() {
-    try {
-        updateSrcFlags();
-        // 从新的可视化界面读取数据
-        const hsyncLen = parseInt(document.getElementById('src-hsync-len').value) || 0;
-        const hback = parseInt(document.getElementById('src-hback').value) || 0;
-        const hdisplay = parseInt(document.getElementById('src-hdisplay').value) || 0;
-        const hfront = parseInt(document.getElementById('src-hfront').value) || 0;
-
-        const vsyncLen = parseInt(document.getElementById('src-vsync-len').value) || 0;
-        const vback = parseInt(document.getElementById('src-vback').value) || 0;
-        const vdisplay = parseInt(document.getElementById('src-vdisplay').value) || 0;
-        const vfront = parseInt(document.getElementById('src-vfront').value) || 0;
-
-        // 计算时序参数
-        const hsync_start = hdisplay + hfront;
-        const hsync_end = hsync_start + hsyncLen;
-        const htotal = hsyncLen + hback + hdisplay + hfront;
-
-        const vsync_start = vdisplay + vfront;
-        const vsync_end = vsync_start + vsyncLen;
-        const vtotal = vsyncLen + vback + vdisplay + vfront;
-
-        // 收集源模式数据
-        const srcMode = {
-            clock: parseInt(document.getElementById('src-clock').value),
-            hdisplay: hdisplay,
-            hsync_start: hsync_start,
-            hsync_end: hsync_end,
-            htotal: htotal,
-            vdisplay: vdisplay,
-            vsync_start: vsync_start,
-            vsync_end: vsync_end,
-            vtotal: vtotal,
-            flags: parseInt(document.getElementById('src-flags').value)
-        };
-        // 保存源模式
-        await sendRK628Command(2, srcMode); // action=2: 保存源模式
-        // 应用配置
-        await sendRK628Command(6); // action=6: 应用配置
-        showToast('HDMI输入配置已保存并应用', 'success');
-    } catch (error) {
-        console.error('Apply source config error:', error);
-        showToast('保存HDMI输入配置失败: ' + (error.msg || 'error'), 'error');
-    }
-}
-/**
- * 保存并应用屏幕输出配置
- */
-async function applyDstConfig() {
-    try {
-        // 从新的可视化界面读取数据
-        const hsyncLen = parseInt(document.getElementById('dst-hsync-len').value) || 0;
-        const hback = parseInt(document.getElementById('dst-hback').value) || 0;
-        const hdisplay = parseInt(document.getElementById('dst-hdisplay').value) || 0;
-        const hfront = parseInt(document.getElementById('dst-hfront').value) || 0;
-
-        const vsyncLen = parseInt(document.getElementById('dst-vsync-len').value) || 0;
-        const vback = parseInt(document.getElementById('dst-vback').value) || 0;
-        const vdisplay = parseInt(document.getElementById('dst-vdisplay').value) || 0;
-        const vfront = parseInt(document.getElementById('dst-vfront').value) || 0;
-
-        // 计算时序参数
-        const hsync_start = hdisplay + hfront;
-        const hsync_end = hsync_start + hsyncLen;
-        const htotal = hsyncLen + hback + hdisplay + hfront;
-
-        const vsync_start = vdisplay + vfront;
-        const vsync_end = vsync_start + vsyncLen;
-        const vtotal = vsyncLen + vback + vdisplay + vfront;
-
-        // 收集目标模式数据
-        const dstMode = {
-            clock: parseInt(document.getElementById('dst-clock').value),
-            hdisplay: hdisplay,
-            hsync_start: hsync_start,
-            hsync_end: hsync_end,
-            htotal: htotal,
-            vdisplay: vdisplay,
-            vsync_start: vsync_start,
-            vsync_end: vsync_end,
-            vtotal: vtotal,
-            flags: parseInt(document.getElementById('dst-flags').value)
-        };
-        // 保存目标模式
-        await sendRK628Command(3, dstMode); // action=3: 保存目标模式
-        // 应用配置
-        await sendRK628Command(6); // action=6: 应用配置
-        showToast('屏幕输出配置已保存并应用', 'success');
-    } catch (error) {
-        console.error('Apply destination config error:', error);
-        showToast('保存屏幕输出配置失败: ' + (error.msg || 'error'), 'error');
-    }
-}
-/**
  * 保存并应用EDID配置
  */
-async function applyEdidConfig() {
-    try {
-        // 收集EDID数据
-        const edidHex = document.getElementById('edid-hex').value.replace(/\s/g, '');
-        if (edidHex.length !== 512) {
-            showToast('EDID必须是512个十六进制字符', 'error');
-            return;
-        }
-        // 验证EDID是否为有效的十六进制
-        if (!/^[0-9a-fA-F]{512}$/.test(edidHex)) {
-            showToast('EDID包含无效字符，请只使用0-9和a-f', 'error');
-            return;
-        }
-        // 保存EDID
-        await sendRK628Command(4, { edid: edidHex }); // action=4: 保存EDID
-        // 应用配置
-        await sendRK628Command(6); // action=6: 应用配置
-        showToast('EDID配置已保存并应用', 'success');
-    } catch (error) {
-        console.error('Apply EDID config error:', error);
-        showToast('保存EDID配置失败: ' + (error.msg || 'error'), 'error');
-    }
-}
-/**
- * 重置HDMI输入配置为默认值
- */
-async function resetRK628SrcToDefault() {
-    confirmModal('确定要恢复HDMI输入配置为默认值吗？', async () => {
-        try {
-            // 使用全局恢复默认，然后只重新加载源模式部分
-            await sendRK628Command(5); // action=5: 恢复默认配置
-            showToast('HDMI输入配置已恢复为默认值', 'success');
-            // 重新加载配置
-            setTimeout(() => loadRK628Config(), 500);
-        } catch (error) {
-            console.error('Reset source config error:', error);
-            showToast('恢复HDMI输入默认值失败: ' + (error.msg || 'error'), 'error');
-        }
-    }, '恢复默认');
-}
-/**
- * 重置屏幕输出配置为默认值
- */
-async function resetRK628DstToDefault() {
-    confirmModal('确定要恢复屏幕输出配置为默认值吗？', async () => {
-        try {
-            // 使用全局恢复默认，然后只重新加载目标模式部分
-            await sendRK628Command(5); // action=5: 恢复默认配置
-            showToast('屏幕输出配置已恢复为默认值', 'success');
-            // 重新加载配置
-            setTimeout(() => loadRK628Config(), 500);
-        } catch (error) {
-            console.error('Reset destination config error:', error);
-            showToast('恢复屏幕输出默认值失败: ' + (error.msg || 'error'), 'error');
-        }
-    }, '恢复默认');
-}
-/**
- * 重置EDID配置为默认值
- */
-async function resetEdidToDefault() {
-    confirmModal('确定要恢复EDID配置为默认值吗？', async () => {
-        try {
-            showToast('正在恢复EDID默认值...', 'info');
-            // 使用全局恢复默认，然后只重新加载EDID
-            await sendRK628Command(5); // action=5: 恢复默认配置
-            showToast('EDID配置已恢复为默认值', 'success');
-            // 重新加载配置（立即刷新，避免“看起来没生效”）
-            await loadRK628Config();
-        } catch (error) {
-            console.error('Reset EDID config error:', error);
-            showToast('恢复EDID默认值失败: ' + (error.msg || 'error'), 'error');
-        }
-    }, '恢复默认');
-}
-// ========== 频点计算器功能 ==========
-// 支持的HDMI RX频点列表 (KHz)
-const SUPPORTED_CLOCKS = [
-    25175, 27000, 33750, 40000, 59400, 65000, 68250, 74250,
-    75000, 83500, 85500, 88750, 928125, 101000, 102250, 108000,
-    118800, 119000, 135000, 148500, 150000, 162000, 165000, 297000
-];
-function populateSrcClockOptions() {
-    const selectElement = document.getElementById('src-clock');
-    if (!selectElement || selectElement.dataset.populated === '1') {
+function applyEdidConfig() {
+    const result = parseEdidHex(document.getElementById('edid-hex')?.value || '');
+    if (!result.valid) {
+        showToast('无法写入: ' + result.error, 'error');
         return;
     }
-    selectElement.innerHTML = '';
-    SUPPORTED_CLOCKS.forEach((clock) => {
-        const option = document.createElement('option');
-        option.value = String(clock);
-        option.textContent = String(clock);
-        if (clock === 148500) {
-            option.selected = true;
+
+    confirmModal('写入后将重新加载 RK628，显示会短暂中断。确定继续吗？', async () => {
+        const saveButton = document.getElementById('edid-save-button');
+        if (saveButton) saveButton.disabled = true;
+        try {
+            showToast('正在写入 EDID...', 'info');
+            await sendRK628CommandWithTimeout(4, { edid: result.cleanHex }, 6000);
+            await sendRK628CommandWithTimeout(7, {
+                power_cycle: 1,
+                poweroff_ms: 200,
+                reset_ms: 10,
+                settle_ms: 50,
+            }, 10000);
+            showToast('EDID 写入和重载请求已提交', 'success');
+        } catch (error) {
+            console.error('Apply EDID config error:', error);
+            showToast('写入 EDID 失败: ' + rk628ExtractErrorMessage(error), 'error');
+        } finally {
+            updateEdidCharCount();
         }
-        selectElement.appendChild(option);
-    });
-    selectElement.dataset.populated = '1';
+    }, '写入 EDID');
 }
-/**
- * 计算像素时钟频点
- */
-window.calculateClock = function () {
-    const htotal = parseInt(document.getElementById('calc-htotal').value);
-    const vtotal = parseInt(document.getElementById('calc-vtotal').value);
-    const fps = parseInt(document.getElementById('calc-fps').value);
-    // 验证输入
-    if (!htotal || !vtotal || !fps) {
-        showToast('请填写完整的计算参数');
-        return;
-    }
-    if (htotal <= 0 || vtotal <= 0 || fps <= 0) {
-        showToast('参数必须大于0');
-        return;
-    }
-    // 计算频点 (转换为 KHz)
-    const calculatedClock = Math.round((htotal * vtotal * fps) / 1000);
-    // 找到最接近的支持频点
-    const closestClock = findClosestClock(calculatedClock);
-    // 计算实际刷新率
-    const actualFps = Math.round((closestClock * 1000) / (htotal * vtotal) * 10) / 10;
-    // 显示结果
-    document.getElementById('calcResultClock').textContent = calculatedClock.toLocaleString();
-    document.getElementById('closestClockValue').textContent = closestClock.toLocaleString() + ' KHz';
-    document.getElementById('actualFps').textContent = actualFps + ' Hz';
-    // 显示结果区域
-    document.getElementById('clockCalcResult').style.display = 'block';
-    // 自动选择最接近的频点
-    const selectElement = document.getElementById('src-clock');
-    selectElement.value = closestClock.toString();
-    // 高亮提示
-    selectElement.classList.add('clock-updated');
-    setTimeout(() => {
-        selectElement.classList.remove('clock-updated');
-    }, 1000);
-    // 显示提示
-    if (calculatedClock === closestClock) {
-        showToast(`频点 ${closestClock} KHz 已选择（完全匹配）`);
-    } else {
-        const diff = Math.abs(calculatedClock - closestClock);
-        const diffPercent = ((diff / calculatedClock) * 100).toFixed(1);
-        showToast(`已选择最接近频点 ${closestClock} KHz，实际刷新率 ${actualFps} Hz（偏差 ${diffPercent}%）`);
-    }
-};
-/**
- * 找到最接近的支持频点
- */
-function findClosestClock(targetClock) {
-    let closest = SUPPORTED_CLOCKS[0];
-    let minDiff = Math.abs(targetClock - closest);
-    for (const clock of SUPPORTED_CLOCKS) {
-        const diff = Math.abs(targetClock - clock);
-        if (diff < minDiff) {
-            minDiff = diff;
-            closest = clock;
-        }
-    }
-    return closest;
-}
-/**
- * 自动填充计算器（当用户修改htotal/vtotal时）
- */
-function autoFillCalculator() {
-    // 监听水平/垂直参数变化，自动填充到计算器
-    const srcHtotal = document.getElementById('src-htotal');
-    const srcVtotal = document.getElementById('src-vtotal');
-    if (srcHtotal) {
-        srcHtotal.addEventListener('change', function () {
-            document.getElementById('calc-htotal').value = this.value;
-        });
-    }
-    if (srcVtotal) {
-        srcVtotal.addEventListener('change', function () {
-            document.getElementById('calc-vtotal').value = this.value;
-        });
-    }
-}
-// 页面加载时初始化
-if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', () => {
-        autoFillCalculator();
-        populateSrcClockOptions();
-    });
-} else {
-    autoFillCalculator();
-    populateSrcClockOptions();
-}
-// ========== 显示时序参数自动计算 ==========
-window.updateSrcTiming = function () {
-    populateSrcClockOptions();
-    const hsyncLen = parseInt(document.getElementById('src-hsync-len').value) || 0;
-    const hback = parseInt(document.getElementById('src-hback').value) || 0;
-    const hdisplay = parseInt(document.getElementById('src-hdisplay').value) || 0;
-    const hfront = parseInt(document.getElementById('src-hfront').value) || 0;
-    const vsyncLen = parseInt(document.getElementById('src-vsync-len').value) || 0;
-    const vback = parseInt(document.getElementById('src-vback').value) || 0;
-    const vdisplay = parseInt(document.getElementById('src-vdisplay').value) || 0;
-    const vfront = parseInt(document.getElementById('src-vfront').value) || 0;
-    const fps = parseInt(document.getElementById('src-fps').value) || 60;
-    const htotal = hsyncLen + hback + hdisplay + hfront;
-    const vtotal = vsyncLen + vback + vdisplay + vfront;
-    document.getElementById('src-htotal-display').textContent = htotal;
-    document.getElementById('src-vtotal-display').textContent = vtotal;
-    if (htotal > 0 && vtotal > 0 && fps > 0) {
-        const calculatedClock = Math.round((htotal * vtotal * fps) / 1000);
-        const closestClock = findClosestClock(calculatedClock);
-        const actualFps = Math.round((closestClock * 1000) / (htotal * vtotal) * 10) / 10;
-
-        // 使用 toast 显示推荐频点信息
-        if (calculatedClock === closestClock) {
-            showToast(`✓ 推荐频点 ${(closestClock / 1000).toFixed(2)} MHz（完全匹配）`);
-        } else {
-            const diff = Math.abs(calculatedClock - closestClock);
-            const diffPercent = ((diff / calculatedClock) * 100).toFixed(1);
-            showToast(`💡 推荐频点 ${(closestClock / 1000).toFixed(2)} MHz，实际刷新率 ${actualFps} Hz（偏差 ${diffPercent}%）`, 3000);
-        }
-
-        document.getElementById('src-clock').value = closestClock.toString();
-    }
-};
-
-/**
- * 计算屏幕输出像素时钟
- * @returns {number} 像素时钟（KHz）
- */
-function calculateDstPixelClock() {
-    // 当前实现固定返回 120000 KHz
-    return 120000;
-}
-
-// ========== RK628 快速切换（模式列表 -> 生成EDID -> 刷入 -> 硬重启） ==========
-
-let rk628QuickModes = [];
-let rk628QuickNextId = 1;
-let rk628QuickLastBuiltEdidHex = '';
-let rk628QuickPollTimer = null;
-let rk628QuickPollInFlight = false;
-let rk628QuickPollFailCount = 0;
-let rk628QuickEditingModeId = null;
+// ========== RK628 状态与高级调试 ==========
 const rk628QuickRestartDefaults = {
     poweroff: 200,
     reset: 10,
     settle: 50,
 };
-
-function rk628QuickFormatModeLabel(mode) {
-    if (!mode) return '未选择';
-    return `${mode.hdisplay}x${mode.vdisplay} @ ${mode.fps}Hz`;
-}
-
-function rk628QuickSyncOverview() {
-    const countText = `${rk628QuickModes.length}个模式`;
-    const countEl = document.getElementById('rk628-quick-list-summary');
-    if (countEl) countEl.textContent = `模式列表（${countText}）`;
-
-    const edidStateEl = document.getElementById('rk628-quick-edid-state');
-    if (edidStateEl) {
-        edidStateEl.textContent = rk628QuickLastBuiltEdidHex
-            ? '已生成'
-            : (rk628QuickModes.length > 0 ? '待生成' : '未生成');
-    }
-}
-
-function rk628QuickInvalidateEdid() {
-    rk628QuickLastBuiltEdidHex = '';
-    const outEl = document.getElementById('rk628-quick-edid-hex');
-    if (outEl) outEl.value = '';
-    rk628QuickSyncOverview();
-}
 
 function rk628QuickSetStatus(text, level = '') {
     const el = document.getElementById('rk628-quick-status');
@@ -12609,558 +12778,26 @@ function rk628QuickSetInputText(text) {
     if (el) el.textContent = text;
 }
 
-function rk628QuickPreset(key) {
-    const presets = {
-        '1080x1920p60': { h: 1080, v: 1920, hf: 80, hs: 20, hb: 80, vf: 20, vs: 10, vb: 20, fps: 60 },
-        '640x480p60': { h: 640, v: 480, hf: 16, hs: 96, hb: 48, vf: 10, vs: 2, vb: 33, fps: 60 },
-        '800x600p60': { h: 800, v: 600, hf: 40, hs: 128, hb: 88, vf: 1, vs: 4, vb: 23, fps: 60 },
-        '1024x768p60': { h: 1024, v: 768, hf: 24, hs: 136, hb: 160, vf: 3, vs: 6, vb: 29, fps: 60 },
-        '1280x720p60': { h: 1280, v: 720, hf: 110, hs: 40, hb: 220, vf: 5, vs: 5, vb: 20, fps: 60 },
-        '1920x1080p60': { h: 1920, v: 1080, hf: 88, hs: 44, hb: 148, vf: 4, vs: 5, vb: 36, fps: 60 },
-    };
-    return presets[key] || null;
-}
-
-function rk628QuickDefaultCustomMode() {
-    return {
-        name: 'custom',
-        hdisplay: 1080,
-        vdisplay: 1920,
-        hfront: 80,
-        hsync: 20,
-        hback: 80,
-        vfront: 20,
-        vsync: 10,
-        vback: 20,
-        fps: 60,
-    };
-}
-
-function rk628QuickGetEditingMode() {
-    return rk628QuickModes.find((m) => m.id === rk628QuickEditingModeId) || null;
-}
-
-function rk628QuickSyncEditorState() {
-    const editingMode = rk628QuickGetEditingMode();
-    const titleEl = document.getElementById('rk628-quick-editor-title');
-    const resetEl = document.getElementById('rk628-quick-editor-reset');
-    const saveEl = document.getElementById('rk628-quick-editor-save');
-
-    if (titleEl) titleEl.textContent = editingMode ? '编辑模式' : '添加模式';
-    if (resetEl) resetEl.innerHTML = '<span>↺</span><span>新建模式</span>';
-    if (saveEl) {
-        saveEl.innerHTML = editingMode
-            ? '<span>✓</span><span>保存修改</span>'
-            : '<span>＋</span><span>添加模式</span>';
-    }
-}
-
-function rk628QuickModeFromPreset(key) {
-    const p = rk628QuickPreset(key);
-    if (!p) return null;
-    return {
-        name: key,
-        hdisplay: p.h,
-        vdisplay: p.v,
-        hfront: p.hf,
-        hsync: p.hs,
-        hback: p.hb,
-        vfront: p.vf,
-        vsync: p.vs,
-        vback: p.vb,
-        fps: p.fps,
-    };
-}
-
-function rk628QuickSetCustomField(id, value) {
-    const el = document.getElementById(id);
-    if (!el) return;
-    el.value = String(value ?? '');
-}
-
-function rk628QuickFillCustomForm(mode) {
-    const draft = { ...rk628QuickDefaultCustomMode(), ...(mode || {}) };
-    rk628QuickSetCustomField('rk628-quick-custom-name', draft.name || 'custom');
-    rk628QuickSetCustomField('rk628-quick-custom-hdisplay', draft.hdisplay);
-    rk628QuickSetCustomField('rk628-quick-custom-vdisplay', draft.vdisplay);
-    rk628QuickSetCustomField('rk628-quick-custom-fps', draft.fps);
-    rk628QuickSetCustomField('rk628-quick-custom-hfront', draft.hfront);
-    rk628QuickSetCustomField('rk628-quick-custom-hsync', draft.hsync);
-    rk628QuickSetCustomField('rk628-quick-custom-hback', draft.hback);
-    rk628QuickSetCustomField('rk628-quick-custom-vfront', draft.vfront);
-    rk628QuickSetCustomField('rk628-quick-custom-vsync', draft.vsync);
-    rk628QuickSetCustomField('rk628-quick-custom-vback', draft.vback);
-    rk628QuickRefreshCustomDraft();
-}
-
-function rk628QuickReadCustomMode() {
-    const defaults = rk628QuickDefaultCustomMode();
-    const readNumber = (id, fallback, minValue = 0) => {
-        const value = parseInt(document.getElementById(id)?.value || '', 10);
-        if (!Number.isFinite(value)) return fallback;
-        return Math.max(minValue, value);
-    };
-
-    const name = (document.getElementById('rk628-quick-custom-name')?.value || '').trim() || 'custom';
-    return {
-        name,
-        hdisplay: readNumber('rk628-quick-custom-hdisplay', defaults.hdisplay, 1),
-        vdisplay: readNumber('rk628-quick-custom-vdisplay', defaults.vdisplay, 1),
-        hfront: readNumber('rk628-quick-custom-hfront', defaults.hfront),
-        hsync: readNumber('rk628-quick-custom-hsync', defaults.hsync),
-        hback: readNumber('rk628-quick-custom-hback', defaults.hback),
-        vfront: readNumber('rk628-quick-custom-vfront', defaults.vfront),
-        vsync: readNumber('rk628-quick-custom-vsync', defaults.vsync),
-        vback: readNumber('rk628-quick-custom-vback', defaults.vback),
-        fps: readNumber('rk628-quick-custom-fps', defaults.fps, 1),
-    };
-}
-
-function rk628QuickRefreshCustomDraft() {
-    const draft = rk628QuickReadCustomMode();
-    const derived = rk628QuickDerived(draft);
-    const updateText = (id, text) => {
-        const el = document.getElementById(id);
-        if (el) el.textContent = text;
-    };
-    updateText('rk628-quick-draft-htotal', `HT ${derived.htotal}`);
-    updateText('rk628-quick-draft-vtotal', `VT ${derived.vtotal}`);
-    updateText('rk628-quick-draft-clock', `Clock ${derived.closestClock}kHz`);
-    updateText('rk628-quick-draft-actual', `Actual ${derived.actualFps}Hz`);
-}
-
-function rk628QuickApplySelectedPreset() {
-    const select = document.getElementById('rk628-quick-preset-select');
-    const key = select?.value || '';
-    if (!key) return;
-    const mode = rk628QuickModeFromPreset(key);
-    if (!mode) {
-        showToast('未知预设: ' + key, 'error');
-        return;
-    }
-    rk628QuickFillCustomForm(mode);
-}
-
-function rk628QuickResetCustomForm() {
-    const select = document.getElementById('rk628-quick-preset-select');
-    if (select) select.value = '1080x1920p60';
-    rk628QuickEditingModeId = null;
-    rk628QuickFillCustomForm(rk628QuickDefaultCustomMode());
-    rk628QuickSyncEditorState();
-}
-
-function rk628QuickSaveCustomMode() {
-    const draft = rk628QuickReadCustomMode();
-    const editingMode = rk628QuickGetEditingMode();
-    if (editingMode) {
-        Object.assign(editingMode, draft);
-        rk628QuickInvalidateEdid();
-        rk628QuickRenderModes();
-        rk628QuickSyncEditorState();
-        rk628QuickSetStatus('已更新模式', '');
-        return;
-    }
-
-    const mode = {
-        id: rk628QuickNextId++,
-        preferred: rk628QuickModes.length === 0,
-        ...draft,
-    };
-    rk628QuickModes.push(mode);
-    rk628QuickInvalidateEdid();
-    rk628QuickRenderModes();
-    rk628QuickSetStatus('已添加自定义模式', '');
-}
-
-function rk628QuickAddCustomMode() {
-    rk628QuickEditingModeId = null;
-    rk628QuickSaveCustomMode();
-}
-
-function rk628QuickAddPreset(key) {
-    const draft = rk628QuickModeFromPreset(key);
-    if (!draft) {
-        showToast('未知预设: ' + key, 'error');
-        return;
-    }
-    const mode = {
-        id: rk628QuickNextId++,
-        preferred: rk628QuickModes.length === 0,
-        ...draft,
-    };
-    rk628QuickModes.push(mode);
-    rk628QuickInvalidateEdid();
-    rk628QuickRenderModes();
-    rk628QuickSetStatus('已添加模式', '');
-    rk628QuickFillCustomForm(draft);
-}
-
-function rk628QuickAddSelectedPreset() {
-    rk628QuickAddCustomMode();
-}
-
-function rk628QuickAddEmptyMode() {
-    rk628QuickResetCustomForm();
-    rk628QuickAddCustomMode();
-}
-
-function rk628QuickLoadModeToEditor(id) {
-    const mode = rk628QuickModes.find((m) => m.id === id);
-    if (!mode) return;
-    const select = document.getElementById('rk628-quick-preset-select');
-    if (select) select.value = '';
-    rk628QuickEditingModeId = id;
-    rk628QuickFillCustomForm(mode);
-    rk628QuickSyncEditorState();
-    rk628QuickSetStatus('已载入模式', '');
-}
-
-function rk628QuickClearModes() {
-    rk628QuickModes = [];
-    rk628QuickEditingModeId = null;
-    rk628QuickLastBuiltEdidHex = '';
-    const edidEl = document.getElementById('rk628-quick-edid-hex');
-    if (edidEl) edidEl.value = '';
-    rk628QuickRenderModes();
-    rk628QuickSyncEditorState();
-    rk628QuickSetStatus('已清空', '');
-}
-
-function rk628QuickRemoveMode(id) {
-    if (rk628QuickEditingModeId === id) {
-        rk628QuickEditingModeId = null;
-        rk628QuickFillCustomForm(rk628QuickDefaultCustomMode());
-        rk628QuickSyncEditorState();
-    }
-    rk628QuickModes = rk628QuickModes.filter(m => m.id !== id);
-    if (rk628QuickModes.length > 0 && !rk628QuickModes.some(m => m.preferred)) {
-        rk628QuickModes[0].preferred = true;
-    }
-    rk628QuickInvalidateEdid();
-    rk628QuickRenderModes();
-}
-
-function rk628QuickSetPreferred(id) {
-    rk628QuickModes.forEach(m => { m.preferred = (m.id === id); });
-    rk628QuickInvalidateEdid();
-    rk628QuickRenderModes();
-}
-
-function rk628QuickUpdateModeField(id, field, value) {
-    const m = rk628QuickModes.find(x => x.id === id);
-    if (!m) return;
-    const n = parseInt(value);
-    if (!Number.isFinite(n)) return;
-    m[field] = n;
-    rk628QuickInvalidateEdid();
-    rk628QuickRenderModes();
-}
-
-function rk628QuickDerived(m) {
-    const htotal = (m.hdisplay || 0) + (m.hfront || 0) + (m.hsync || 0) + (m.hback || 0);
-    const vtotal = (m.vdisplay || 0) + (m.vfront || 0) + (m.vsync || 0) + (m.vback || 0);
-    const fps = m.fps || 60;
-    const calculatedClock = Math.round((htotal * vtotal * fps) / 1000);
-    const closestClock = findClosestClock(calculatedClock);
-    const actualFps = htotal > 0 && vtotal > 0 ? Math.round((closestClock * 1000) / (htotal * vtotal) * 10) / 10 : 0;
-    return { htotal, vtotal, calculatedClock, closestClock, actualFps };
-}
-
-function rk628QuickToggleModeAdvanced(id) {
-    const m = rk628QuickModes.find(x => x.id === id);
-    if (!m) return;
-    m.adv = !m.adv;
-    rk628QuickRenderModes();
-}
-
-function rk628QuickRenderModes() {
-    const container = document.getElementById('rk628-quick-modes');
-    if (!container) return;
-
-    if (rk628QuickEditingModeId && !rk628QuickModes.some((m) => m.id === rk628QuickEditingModeId)) {
-        rk628QuickEditingModeId = null;
-    }
-
-    if (rk628QuickModes.length === 0) {
-        rk628QuickSyncOverview();
-        rk628QuickSyncEditorState();
-        container.innerHTML = '<div class="rk628-mode-empty"><div class="rk628-mode-empty-title">还没有模式</div><div class="field-hint">左侧创建一个模式后加入列表</div></div>';
-        return;
-    }
-
-    const html = rk628QuickModes.map((m) => {
-        const preferredClass = m.preferred ? 'is-preferred' : '';
-        const editingClass = rk628QuickEditingModeId === m.id ? 'is-editing' : '';
-        const name = (m.name || 'custom');
-        const subtitle = `${m.hdisplay} x ${m.vdisplay} @ ${m.fps}Hz`;
-        const preferredBadge = m.preferred ? '<span class="rk628-mode-badge is-preferred">默认</span>' : '';
-        const preferredAction = m.preferred ? '' : `<button class="btn-base btn-compact btn-tonal" onclick="rk628QuickSetPreferred(${m.id})">设默认</button>`;
-        return `
-            <div class="rk628-mode-row ${preferredClass} ${editingClass}" data-id="${m.id}">
-                <div class="rk628-mode-row-top">
-                    <div class="rk628-mode-row-title">
-                        <div class="rk628-mode-row-title-main">
-                            <div class="rk628-mode-name">${name}</div>
-                            ${preferredBadge}
-                        </div>
-                        <div class="rk628-mode-summary">${subtitle}</div>
-                    </div>
-                    <div class="rk628-mode-row-actions">
-                        ${preferredAction}
-                        <button class="btn-base btn-compact btn-tonal" onclick="rk628QuickLoadModeToEditor(${m.id})">编辑</button>
-                        <button class="btn-base btn-compact btn-tonal is-warning" onclick="rk628QuickRemoveMode(${m.id})">删除</button>
-                    </div>
-                </div>
-            </div>
-        `;
-    }).join('');
-
-    container.innerHTML = html;
-    rk628QuickSyncOverview();
-    rk628QuickSyncEditorState();
-
-    // number input 在聚焦时滚轮会改数值，导致页面/列表无法滚动；这里将滚轮行为转为滚动列表
+async function loadRK628Status() {
     try {
-        const scroller = container;
-        container.querySelectorAll('input[type="number"]').forEach((inp) => {
-            inp.addEventListener('wheel', (e) => {
-                // scroll the list instead of changing value
-                scroller.scrollTop += e.deltaY;
-                e.preventDefault();
-            }, { passive: false });
-        });
-    } catch (e) {
-        // ignore
-    }
-}
-
-async function rk628QuickEnsureEdidTemplateLoaded() {
-    // 严格按下位机返回格式：512个hex字符（256字节），不做“猜测/截取”。
-    const res = await sendRK628CommandWithTimeout(1, null, 8000);
-    if (res && res.data) {
-        rk628ConfigData = res.data;
-        // 同步旧 EDID 页面缓存（不改变其UI逻辑）
-        const edidInput = document.getElementById('edid-hex');
-        if (edidInput && rk628ConfigData.edid) {
-            edidInput.value = rk628ConfigData.edid;
-            updateEdidCharCount();
+        const result = await sendRK628CommandWithTimeout(8, null, 3000);
+        const data = result?.data || {};
+        const width = Number(data.hdisplay) || 0;
+        const height = Number(data.vdisplay) || 0;
+        const clock = Number(data.clock) || 0;
+        rk628QuickSetInputText(width && height ? `${width}x${height}  ${clock}kHz` : '-');
+        if (data.restarting) {
+            rk628QuickSetStatus('重载中', '');
+        } else if (data.hdmirx_lock) {
+            rk628QuickSetStatus('已锁定', 'valid');
+        } else if (data.hdmirx_plugin) {
+            rk628QuickSetStatus('已连接', '');
+        } else {
+            rk628QuickSetStatus('无输入', '');
         }
-    }
-
-    if (!rk628ConfigData || typeof rk628ConfigData.edid !== 'string') {
-        throw new Error('未能从下位机获取EDID模板');
-    }
-
-    const bytes = rk628QuickHexToBytes(rk628ConfigData.edid);
-    if (!rk628QuickIsValidEdidBytes(bytes)) {
-        throw new Error('下位机返回的EDID模板无效（建议先在“EDID配置”里恢复默认EDID）');
-    }
-
-    rk628ConfigData.edid = rk628QuickBytesToHex(bytes);
-    return rk628ConfigData.edid;
-}
-
-function rk628QuickHexToBytes(hexString) {
-    const s = (hexString || '').trim();
-    if (!/^[0-9a-fA-F]{512}$/.test(s)) {
-        throw new Error(`EDID需要256字节（=512个16进制字符），当前长度=${s.length}`);
-    }
-    const clean = s.toLowerCase();
-    const out = new Uint8Array(256);
-    for (let i = 0; i < 256; i++) {
-        out[i] = parseInt(clean.substr(i * 2, 2), 16);
-    }
-    return out;
-}
-
-function rk628QuickIsValidEdidBytes(edidBytes) {
-    if (!edidBytes || edidBytes.length !== 256) return false;
-    // header: 00 ff ff ff ff ff ff 00
-    const hdr = [0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00];
-    for (let i = 0; i < 8; i++) {
-        if (edidBytes[i] !== hdr[i]) return false;
-    }
-    // checksum for 2 blocks
-    for (let b = 0; b < 2; b++) {
-        let sum = 0;
-        for (let i = 0; i < 128; i++) {
-            sum = (sum + edidBytes[b * 128 + i]) & 0xFF;
-        }
-        if (sum !== 0) return false;
-    }
-    return true;
-}
-
-function rk628QuickBytesToHex(bytes) {
-    let s = '';
-    for (let i = 0; i < bytes.length; i++) {
-        s += bytes[i].toString(16).padStart(2, '0');
-    }
-    return s;
-}
-
-// optional helper for debugging template EDID header in console
-function rk628QuickDebugTemplateEdidHeader() {
-    try {
-        const hex = (rk628ConfigData && rk628ConfigData.edid) ? rk628ConfigData.edid : '';
-        const b = rk628QuickHexToBytes(hex);
-        console.log('[RK628 Quick] EDID ext_count=', b[0x7E], 'ext_tag=', b[128]);
-    } catch (e) {
-        console.warn('[RK628 Quick] debug template edid failed', e);
-    }
-}
-
-function rk628QuickFixChecksum(edidBytes, blockIndex) {
-    const base = blockIndex * 128;
-    let sum = 0;
-    for (let i = 0; i < 127; i++) {
-        sum = (sum + edidBytes[base + i]) & 0xFF;
-    }
-    edidBytes[base + 127] = (256 - sum) & 0xFF;
-}
-
-function rk628QuickBuildDtdFromMode(m) {
-    const d = rk628QuickDerived(m);
-    const hactive = m.hdisplay;
-    const vactive = m.vdisplay;
-    const hblank = d.htotal - hactive;
-    const vblank = d.vtotal - vactive;
-    const hsyncOffset = m.hfront;
-    const hsyncPulse = m.hsync;
-    const vsyncOffset = m.vfront;
-    const vsyncPulse = m.vsync;
-    const pclk10khz = Math.max(1, Math.round(d.closestClock / 10));
-
-    if (hactive <= 0 || vactive <= 0 || d.htotal <= 0 || d.vtotal <= 0) {
-        throw new Error('模式参数无效');
-    }
-
-    const dtd = new Uint8Array(18);
-    dtd[0] = pclk10khz & 0xFF;
-    dtd[1] = (pclk10khz >> 8) & 0xFF;
-    dtd[2] = hactive & 0xFF;
-    dtd[3] = hblank & 0xFF;
-    dtd[4] = ((hactive >> 8) & 0xF) << 4 | ((hblank >> 8) & 0xF);
-    dtd[5] = vactive & 0xFF;
-    dtd[6] = vblank & 0xFF;
-    dtd[7] = ((vactive >> 8) & 0xF) << 4 | ((vblank >> 8) & 0xF);
-    dtd[8] = hsyncOffset & 0xFF;
-    dtd[9] = hsyncPulse & 0xFF;
-    dtd[10] = ((vsyncOffset & 0xF) << 4) | (vsyncPulse & 0xF);
-    dtd[11] = ((hsyncOffset >> 8) & 0x3) << 6 |
-        ((hsyncPulse >> 8) & 0x3) << 4 |
-        ((vsyncOffset >> 4) & 0x3) << 2 |
-        ((vsyncPulse >> 4) & 0x3);
-    // size/border/flags left as 0 for compatibility
-    return dtd;
-}
-
-async function rk628QuickBuildEdid() {
-    try {
-        await rk628QuickEnsureEdidTemplateLoaded();
-        if (rk628QuickModes.length === 0) {
-            throw new Error('请先添加至少一个模式');
-        }
-
-        let preferred = rk628QuickModes.find(m => m.preferred);
-        if (!preferred) {
-            rk628QuickModes[0].preferred = true;
-            preferred = rk628QuickModes[0];
-        }
-
-        // Strictly use device-provided EDID template
-        const edid = rk628QuickHexToBytes(rk628ConfigData.edid);
-
-        // base block: replace first DTD
-        edid.set(rk628QuickBuildDtdFromMode(preferred), 54);
-
-        // extension: keep template's data block collection, only replace DTDs
-        const extBase = 128;
-        if (edid[0x7E] !== 1) {
-            throw new Error('模板EDID扩展块数量不为1（请先在“EDID配置”里恢复默认EDID）');
-        }
-        if (edid[extBase + 0] !== 0x02) {
-            throw new Error('模板EDID扩展块不是CEA-861(0x02)（请先在“EDID配置”里恢复默认EDID）');
-        }
-        let dtdOffset = edid[extBase + 2];
-        if (dtdOffset < 4 || dtdOffset >= 127) {
-            throw new Error('模板EDID CEA dtdOffset无效（请先在“EDID配置”里恢复默认EDID）');
-        }
-        const dtdStart = extBase + dtdOffset;
-        for (let i = dtdStart; i < extBase + 127; i++) {
-            edid[i] = 0x00;
-        }
-
-        const extra = rk628QuickModes.filter(m => m.id !== preferred.id);
-        let cursor = dtdStart;
-        for (let i = 0; i < extra.length; i++) {
-            if (cursor + 18 > extBase + 127) break;
-            edid.set(rk628QuickBuildDtdFromMode(extra[i]), cursor);
-            cursor += 18;
-        }
-
-        rk628QuickFixChecksum(edid, 0);
-        rk628QuickFixChecksum(edid, 1);
-
-        const hex = rk628QuickBytesToHex(edid);
-        rk628QuickLastBuiltEdidHex = hex;
-        const outEl = document.getElementById('rk628-quick-edid-hex');
-        if (outEl) outEl.value = hex;
-        const edidInput = document.getElementById('edid-hex');
-        if (edidInput) {
-            edidInput.value = hex;
-            updateEdidCharCount();
-        }
-        rk628QuickSyncOverview();
-        rk628QuickSetStatus('EDID已生成', 'valid');
-        showToast('EDID生成成功', 'success');
-        return hex;
-    } catch (e) {
-        console.error('[RK628 Quick] build edid failed', e);
-        rk628QuickSetStatus('生成失败', 'error');
-        showToast('EDID生成失败: ' + rk628ExtractErrorMessage(e), 'error');
-        return null;
-    }
-}
-
-async function rk628QuickFlashEdid() {
-    try {
-        const hex = await rk628QuickBuildEdid();
-        if (!hex) return;
-        rk628QuickSetStatus('正在刷入EDID...', '');
-        await sendRK628Command(4, { edid: hex });
-        rk628QuickSetStatus('EDID刷入成功', 'valid');
-        showToast('EDID已刷入', 'success');
-    } catch (e) {
-        console.error('[RK628 Quick] flash edid failed', e);
-        rk628QuickSetStatus('刷入失败', 'error');
-        showToast('刷入EDID失败: ' + rk628ExtractErrorMessage(e), 'error');
-        throw e;
-    }
-}
-
-async function rk628QuickViewEdid() {
-    const hex = await rk628QuickBuildEdid();
-    if (!hex) return;
-    switchRK628Tab('edid');
-}
-
-async function rk628QuickHardRestart() {
-    try {
-        rk628QuickSetStatus('正在硬重启RK628...', '');
-        await sendRK628Command(7, {
-            power_cycle: 1,
-            poweroff_ms: rk628QuickRestartDefaults.poweroff,
-            reset_ms: rk628QuickRestartDefaults.reset,
-            settle_ms: rk628QuickRestartDefaults.settle
-        });
-        rk628QuickSetStatus('已触发硬重启', '');
-        showToast('已触发硬重启', 'success');
-    } catch (e) {
-        console.error('[RK628 Quick] hard restart failed', e);
-        rk628QuickSetStatus('硬重启失败', 'error');
-        showToast('硬重启失败: ' + rk628ExtractErrorMessage(e), 'error');
-        throw e;
+    } catch {
+        rk628QuickSetStatus('状态不可用', 'error');
+        rk628QuickSetInputText('-');
     }
 }
 
@@ -13183,6 +12820,166 @@ function rk628QuickPpGetNumber(id, def = 0) {
     const el = document.getElementById(id);
     const v = parseInt(el?.value ?? '');
     return Number.isFinite(v) ? v : def;
+}
+
+let rk628QuickPowerState = {
+    supported: false,
+    enabled: false,
+    loaded: false,
+    inFlight: false,
+};
+
+function rk628QuickPowerDesiredMode() {
+    return !!document.getElementById('rk628-power-mcu')?.checked;
+}
+
+function rk628QuickPowerSelect(enabled) {
+    const screen = document.getElementById('rk628-power-screen');
+    const mcu = document.getElementById('rk628-power-mcu');
+    if (screen) screen.checked = !enabled;
+    if (mcu) mcu.checked = !!enabled;
+}
+
+function rk628QuickPowerRender() {
+    const section = document.getElementById('rk628-power-section');
+    const status = document.getElementById('rk628-power-status');
+    const screen = document.getElementById('rk628-power-screen');
+    const mcu = document.getElementById('rk628-power-mcu');
+    const disabled = !rk628QuickPowerState.supported || rk628QuickPowerState.inFlight;
+
+    if (screen) screen.disabled = disabled;
+    if (mcu) mcu.disabled = disabled;
+    if (section) section.classList.toggle('is-enabled', rk628QuickPowerState.enabled);
+    if (status) {
+        if (rk628QuickPowerState.inFlight) status.textContent = '切换中';
+        else if (!rk628QuickPowerState.loaded) status.textContent = '读取中';
+        else if (!rk628QuickPowerState.supported) status.textContent = '当前固件不支持';
+        else status.textContent = rk628QuickPowerState.enabled ? '兜底已启用' : '默认模式';
+    }
+}
+
+async function rk628QuickPowerLoad(silent = false) {
+    rk628QuickPowerState.inFlight = true;
+    rk628QuickPowerRender();
+    try {
+        const res = await sendRK628CommandWithTimeout(17, null, 5000);
+        const data = res?.data || {};
+        const hasCapability = Object.prototype.hasOwnProperty.call(data, 'mcu_power_fallback_supported');
+        rk628QuickPowerState.supported = hasCapability && Number(data.mcu_power_fallback_supported) === 1;
+        rk628QuickPowerState.enabled = rk628QuickPowerState.supported && Number(data.mcu_power_fallback) === 1;
+        rk628QuickPowerState.loaded = true;
+        rk628QuickPowerSelect(rk628QuickPowerState.enabled);
+    } catch (error) {
+        rk628QuickPowerState.supported = false;
+        rk628QuickPowerState.enabled = false;
+        rk628QuickPowerState.loaded = true;
+        rk628QuickPowerSelect(false);
+        if (!silent) showToast('读取屏幕供电模式失败: ' + rk628ExtractErrorMessage(error), 'error');
+    } finally {
+        rk628QuickPowerState.inFlight = false;
+        rk628QuickPowerRender();
+    }
+}
+
+async function rk628QuickPowerWaitForMode(expected) {
+    for (let attempt = 0; attempt < 8; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, attempt === 0 ? 900 : 350));
+        try {
+            const res = await sendRK628CommandWithTimeout(17, null, 5000);
+            const data = res?.data || {};
+            if (Number(data.mcu_power_fallback_supported) !== 1) continue;
+            const enabled = Number(data.mcu_power_fallback) === 1;
+            if (enabled === expected) return;
+        } catch {
+            // The panel-only restart may briefly delay device responses.
+        }
+    }
+    throw new Error('下位机未确认新的供电模式');
+}
+
+async function rk628QuickPowerApply(enabled) {
+    rk628QuickPowerState.inFlight = true;
+    rk628QuickPowerRender();
+    try {
+        await sendRK628CommandWithTimeout(18, {
+            mcu_power_fallback: enabled ? 1 : 0,
+            persist: 1,
+            restart: 1,
+            power_cycle: 0,
+            reset_ms: 10,
+            settle_ms: 50,
+        }, 7000);
+        await rk628QuickPowerWaitForMode(!!enabled);
+        rk628QuickPowerState.enabled = !!enabled;
+        rk628QuickPowerSelect(!!enabled);
+        showToast(enabled ? 'MCU 供电兜底已启用' : '已恢复屏幕控制供电', 'success');
+    } catch (error) {
+        rk628QuickPowerSelect(rk628QuickPowerState.enabled);
+        showToast('切换屏幕供电模式失败: ' + rk628ExtractErrorMessage(error), 'error');
+    } finally {
+        rk628QuickPowerState.inFlight = false;
+        rk628QuickPowerRender();
+    }
+}
+
+function rk628QuickPowerConfirmEnable() {
+    showModal('启用 MCU 供电兜底', `
+        <div class="rk628-power-confirm">
+            <div class="rk628-power-confirm-warning">
+                此模式仅用于 S6E3FA3 屏幕无法正常点亮时的调试兜底。启用后 MCU 将直接驱动供电 IC，屏幕亮度将无法正确调节。
+            </div>
+            <div class="rk628-power-confirm-checks">
+                <label class="flag-checkbox"><input type="checkbox" id="rk628-power-confirm-resistors"><span>我已确认 R46、R39 均未贴装</span></label>
+                <label class="flag-checkbox"><input type="checkbox" id="rk628-power-confirm-brightness"><span>我已知悉启用后亮度无法正确调节</span></label>
+            </div>
+        </div>
+    `, () => {
+        const resistors = document.getElementById('rk628-power-confirm-resistors');
+        const brightness = document.getElementById('rk628-power-confirm-brightness');
+        if (!resistors?.checked || !brightness?.checked) return false;
+        rk628QuickPowerApply(true);
+        return true;
+    }, 'md');
+
+    const confirm = document.getElementById('modalConfirm');
+    const updateConfirm = () => {
+        const resistors = document.getElementById('rk628-power-confirm-resistors');
+        const brightness = document.getElementById('rk628-power-confirm-brightness');
+        if (confirm) {
+            confirm.disabled = !resistors?.checked || !brightness?.checked;
+            confirm.style.opacity = confirm.disabled ? '0.45' : '1';
+            confirm.style.cursor = confirm.disabled ? 'not-allowed' : 'pointer';
+        }
+    };
+    if (confirm) confirm.textContent = '确认启用并重启显示';
+    document.getElementById('rk628-power-confirm-resistors')?.addEventListener('change', updateConfirm);
+    document.getElementById('rk628-power-confirm-brightness')?.addEventListener('change', updateConfirm);
+    updateConfirm();
+}
+
+function rk628QuickPowerConfirmScreenControl() {
+    showModal('切换为屏幕控制', `
+        <div class="rk628-power-confirm">
+            <div class="rk628-power-confirm-warning">
+                将关闭 MCU 供电兜底，PA0 和 PA1 恢复高阻态，并重启显示输出。
+            </div>
+        </div>
+    `, () => {
+        rk628QuickPowerApply(false);
+        return true;
+    }, 'sm');
+    const confirm = document.getElementById('modalConfirm');
+    if (confirm) confirm.textContent = '确认切换并重启显示';
+}
+
+function rk628QuickPowerModeChanged() {
+    if (!rk628QuickPowerState.supported || rk628QuickPowerState.inFlight) return;
+    const desired = rk628QuickPowerDesiredMode();
+    if (desired === rk628QuickPowerState.enabled) return;
+    rk628QuickPowerSelect(rk628QuickPowerState.enabled);
+    rk628QuickPowerRender();
+    if (desired) rk628QuickPowerConfirmEnable();
+    else rk628QuickPowerConfirmScreenControl();
 }
 
 function rk628QuickPpApplyUiState(t) {
@@ -13346,134 +13143,6 @@ async function rk628QuickPpDumpRegs() {
     }
 }
 
-function rk628QuickStartPolling() {
-    if (rk628QuickPollTimer) return;
-    rk628QuickPollTimer = setInterval(async () => {
-        if (rk628QuickPollInFlight) return;
-        rk628QuickPollInFlight = true;
-        try {
-            const res = await sendRK628CommandWithTimeout(8, null, 2000);
-            const d = res.data || {};
-            const w = d.hdisplay || 0;
-            const h = d.vdisplay || 0;
-            const clk = d.clock || 0;
-            rk628QuickSetInputText(w && h ? `${w}x${h}  ${clk}kHz` : '-');
-
-            if (d.restarting) {
-                rk628QuickSetStatus('重启中...', '');
-            } else {
-                if (d.hdmirx_lock) {
-                    rk628QuickSetStatus('已锁定', 'valid');
-                } else if (d.hdmirx_plugin) {
-                    rk628QuickSetStatus('已插入/未锁定', '');
-                } else {
-                    rk628QuickSetStatus('未插入', '');
-                }
-            }
-            rk628QuickPollFailCount = 0;
-        } catch (e) {
-            rk628QuickPollFailCount++;
-            if (rk628QuickPollFailCount >= 3) {
-                rk628QuickSetStatus('状态查询不可用', 'error');
-                rk628QuickSetInputText('-');
-                rk628QuickStopPolling();
-            }
-        } finally {
-            rk628QuickPollInFlight = false;
-        }
-    }, 600);
-}
-
-function rk628QuickStopPolling() {
-    if (rk628QuickPollTimer) {
-        clearInterval(rk628QuickPollTimer);
-        rk628QuickPollTimer = null;
-    }
-    rk628QuickPollInFlight = false;
-    rk628QuickPollFailCount = 0;
-}
-
-async function rk628QuickFlashEdidAndRestart() {
-    try {
-        await rk628QuickFlashEdid();
-        await rk628QuickHardRestart();
-        rk628QuickSetStatus('已触发硬重启，等待事件...', '');
-        showToast('已触发硬重启', 'success');
-    } catch (e) {
-        console.error('[RK628 Quick] restart failed', e);
-        rk628QuickSetStatus('硬重启失败', 'error');
-        showToast('硬重启失败: ' + rk628ExtractErrorMessage(e), 'error');
-    }
-}
-
-/**
- * 更新屏幕输出时序参数
- */
-window.updateDstTiming = function () {
-    // 计算水平总计
-    const hsyncLen = parseInt(document.getElementById('dst-hsync-len').value) || 0;
-    const hback = parseInt(document.getElementById('dst-hback').value) || 0;
-    const hdisplay = parseInt(document.getElementById('dst-hdisplay').value) || 0;
-    const hfront = parseInt(document.getElementById('dst-hfront').value) || 0;
-
-    // 计算垂直总计
-    const vsyncLen = parseInt(document.getElementById('dst-vsync-len').value) || 0;
-    const vback = parseInt(document.getElementById('dst-vback').value) || 0;
-    const vdisplay = parseInt(document.getElementById('dst-vdisplay').value) || 0;
-    const vfront = parseInt(document.getElementById('dst-vfront').value) || 0;
-
-    // 计算总计
-    const htotal = hsyncLen + hback + hdisplay + hfront;
-    const vtotal = vsyncLen + vback + vdisplay + vfront;
-
-    // 更新显示
-    document.getElementById('dst-htotal-display').textContent = htotal;
-    document.getElementById('dst-vtotal-display').textContent = vtotal;
-
-    // 计算并更新像素时钟（固定返回120000，禁止手动编辑）
-    const pixelClock = calculateDstPixelClock();
-    document.getElementById('dst-clock').value = pixelClock;
-
-    // 更新 polarity 标志位
-    updateDstFlags();
-};
-
-/**
- * 更新屏幕输出的 polarity 标志位
- */
-function updateDstFlags() {
-    const hPositive = document.getElementById('dst-hsync-positive').checked;
-    const vPositive = document.getElementById('dst-vsync-positive').checked;
-
-    document.getElementById('dst-flags').value = rk628BuildSyncFlags(hPositive, vPositive);
-}
-
-/**
- * 初始化屏幕输出 polarity 复选框事件监听
- */
-function initDstFlagsListeners() {
-    const hPositiveCheckbox = document.getElementById('dst-hsync-positive');
-    const vPositiveCheckbox = document.getElementById('dst-vsync-positive');
-
-    if (hPositiveCheckbox) {
-        hPositiveCheckbox.addEventListener('change', updateDstFlags);
-    }
-    if (vPositiveCheckbox) {
-        vPositiveCheckbox.addEventListener('change', updateDstFlags);
-    }
-}
-
-// 页面加载时初始化屏幕输出的监听器
-if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', () => {
-        initSrcFlagsListeners();
-        initDstFlagsListeners();
-    });
-} else {
-    initSrcFlagsListeners();
-    initDstFlagsListeners();
-}
-
 // ========== RK628 实时配置（调试用，不写Flash） ==========
 
 let rk628RtState = {
@@ -13581,24 +13250,36 @@ window.rk628RtReload = async function (silent = false) {
     if (rk628RtState.inFlight) return;
     rk628RtState.inFlight = true;
     try {
-        const res = await sendRK628CommandWithTimeout(12, null, 4000);
-        const data = res?.data || {};
-        rk628RtApplyModeToUi(data.mode || data.dst_mode || data, !!data.runtime_override);
+        let data = null;
+        let modeLoaded = false;
         try {
-            const knobs = await sendRK628CommandWithTimeout(17, null, 4000);
-            rk628RtApplyLaneRateToUi(knobs?.data?.fixed_lane_rate_mbps ?? 0);
+            const knobs = await sendRK628CommandWithTimeout(17, null, 5000);
+            data = knobs?.data || null;
+            const mode = data?.effective_dst_mode || data?.mode || data?.dst_mode;
+            if (mode) {
+                rk628RtApplyModeToUi(mode, !!data.runtime_dst_mode);
+                modeLoaded = true;
+            }
+            rk628RtApplyLaneRateToUi(data?.fixed_lane_rate_mbps ?? 0);
         } catch {
-            // Older firmware may not expose display knobs; leave current field unchanged.
+            // Older firmware may not expose display knobs; fall back to mode-only read.
         }
+
+        if (!modeLoaded) {
+            const res = await sendRK628CommandWithTimeout(12, null, 5000);
+            data = res?.data || {};
+            rk628RtApplyModeToUi(data.mode || data.dst_mode || data, !!data.runtime_override);
+        }
+
         rk628RtState.loadedOnce = true;
         rk628RtState.lastLoadTs = Date.now();
 
         if (!silent) {
-            showToast(rk628RtState.runtimeOverride ? '已读取（当前处于实时覆盖）' : '已读取（当前为Flash/默认配置）', 'success');
+            showToast(rk628RtState.runtimeOverride ? '已读取当前运行参数' : '已读取当前生效参数', 'success');
         }
     } catch (e) {
         if (!silent) {
-            showToast('读取失败: ' + rk628ExtractErrorMessage(e), 'error');
+            showToast('从下位机读取失败: ' + rk628ExtractErrorMessage(e), 'error');
         }
     } finally {
         rk628RtState.inFlight = false;
@@ -13640,61 +13321,73 @@ function rk628RtBuildModeFromUi() {
     };
 }
 
+function rk628RtReadLaneRate() {
+    const value = Number(document.getElementById('rt-lane-rate')?.value);
+    if (!Number.isInteger(value) || !(value === 0 || (value >= 80 && value <= 1500))) {
+        throw new Error('Lane Rate 必须为 0（自动）或 80 到 1500 Mbps 的整数');
+    }
+    return value;
+}
+
 window.rk628RtApply = function () {
     (async () => {
         try {
             const mode = rk628RtBuildModeFromUi();
-            const laneRate = rk628RtGetNumber('rt-lane-rate', 0);
-            showToast('正在应用...', 'info');
+            const laneRate = rk628RtReadLaneRate();
+            showToast('正在测试当前参数...', 'info');
             await sendRK628CommandWithTimeout(18, {
                 fixed_lane_rate_mbps: laneRate,
                 persist: 0,
                 restart: 0,
             }, 4000);
             await sendRK628CommandWithTimeout(13, { mode, restart: 1, power_cycle: 0 }, 10000);
-            showToast('已应用（未写Flash）', 'success');
+            showToast('参数已下发并请求重启（未写入 Flash），请观察画面确认', 'success');
 
             setTimeout(() => {
                 try { window.rk628RtReload(true); } catch { }
             }, 1500);
         } catch (e) {
-            showToast('应用失败: ' + rk628ExtractErrorMessage(e), 'error');
+            showToast('测试当前参数失败: ' + rk628ExtractErrorMessage(e), 'error');
         }
     })();
 };
 
 window.rk628RtWriteFlash = function () {
 	showModal(
-		'写入Flash',
+		'保存当前参数',
 		`
 		<div style="line-height:1.65; color: var(--text-primary); padding: 10px 2px;">
-			<div style="font-weight:900; font-size: var(--font-body-lg); margin-bottom: 10px; color: rgba(255, 69, 58, 1);">写入Flash（危险操作）</div>
+			<div style="font-weight:900; font-size: var(--font-body-lg); margin-bottom: 10px; color: rgba(255, 69, 58, 1);">保存当前参数到 Flash</div>
 			<div style="color: rgba(235, 235, 245, 0.75); margin-bottom: 10px;">
-				将当前“屏幕输出”时序和 Lane Rate 写入下位机Flash。写错配置可能导致：
+				将当前屏幕输出时序和 Lane Rate 保存到下位机 Flash。写错配置可能导致：
 			</div>
 			<ul style="margin: 0; padding-left: 18px; color: rgba(235, 235, 245, 0.75);">
 				<li>屏幕黑屏、花屏、闪屏，设备看起来“死机”</li>
 				<li>串口/网络仍在但无法看见画面，调试难度大幅上升</li>
 				<li>需要通过恢复默认/重新刷写配置/断电重启才能恢复</li>
 			</ul>
-			<div style="margin-top: 10px; color: rgba(235, 235, 245, 0.75);">建议：先用“不写Flash”的方式验证稳定，再写入Flash。</div>
+			<div style="margin-top: 10px; color: rgba(235, 235, 245, 0.75);">建议：先点击“测试当前参数”确认画面稳定，再保存当前参数。</div>
 		</div>
 		`,
 		async () => {
 			try {
 				const mode = rk628RtBuildModeFromUi();
-				const laneRate = rk628RtGetNumber('rt-lane-rate', 0);
-				showToast('正在写入Flash...', 'info');
+				const laneRate = rk628RtReadLaneRate();
+				showToast('正在保存当前参数...', 'info');
 				await sendRK628CommandWithTimeout(3, mode, 6000); // action=3: 保存目标模式到Flash
 				await sendRK628CommandWithTimeout(18, {
 					fixed_lane_rate_mbps: laneRate,
 					persist: 1,
 					restart: 0,
 				}, 6000);
-				await sendRK628CommandWithTimeout(13, { mode, restart: 1, power_cycle: 0 }, 10000);
-				showToast('已写入Flash并应用', 'success');
+				await sendRK628CommandWithTimeout(7, {
+					power_cycle: 0,
+					reset_ms: 10,
+					settle_ms: 80,
+				}, 10000);
+				showToast('保存请求已提交并请求硬重启，请重启后重新读取确认', 'success');
 			} catch (e) {
-				showToast('写入Flash失败: ' + rk628ExtractErrorMessage(e), 'error');
+				showToast('保存当前参数失败: ' + rk628ExtractErrorMessage(e), 'error');
 			}
 		},
 		'md'
@@ -14384,24 +14077,10 @@ window.openPage = function (pageName, tabName) {
         } catch (e) {
             console.warn('[RK628] load config failed', e);
         }
-        try {
-            if (typeof rk628ClearDebugLog === 'function') {
-                rk628ClearDebugLog();
-            }
-            if (typeof rk628SetDebugLogSubscribe === 'function') {
-                rk628SetDebugLogSubscribe(true);
-            }
-        } catch (e) {
-            console.warn('[RK628] debug log subscribe failed', e);
-        }
+        loadRK628Status();
     }
 };
 
 window.closePage = function () {
-    const rk628Page = document.getElementById('page-rk628-config');
-    const rk628Active = !!(rk628Page && rk628Page.classList.contains('active'));
-    if (rk628Active && typeof rk628DebugLogSubscribed !== 'undefined' && rk628DebugLogSubscribed && typeof rk628SetDebugLogSubscribe === 'function') {
-        rk628SetDebugLogSubscribe(false);
-    }
     originalClosePage();
 };

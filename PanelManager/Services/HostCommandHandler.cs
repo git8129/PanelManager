@@ -29,7 +29,10 @@ public static class HostCommandHandler
 {
         private static readonly ConcurrentDictionary<string, TaskCompletionSource<bool>> _manualUpdateBootConfirmations = new();
 
-        public static void Register(MessageBridge bridge, FloatingWindowManager floatingWindowManager, OpenCodeSidecarService openCode)
+        public static void Register(
+            MessageBridge bridge,
+            FloatingWindowManager floatingWindowManager,
+            OpenCodeSidecarService openCode)
         {
             floatingWindowManager.AttachBridge(bridge);
 
@@ -1039,7 +1042,7 @@ public static class HostCommandHandler
                 }
             });
             // ===== 手动固件更新 (发送到上位机处理) =====
-            bridge.On(Module.System, "manualUpdate", async msg =>
+            bridge.On(Module.System, "manualUpdate", msg =>
             {
                 try
                 {
@@ -1047,28 +1050,41 @@ public static class HostCommandHandler
                     
                     if (data == null || string.IsNullOrWhiteSpace(data.Path))
                     {
-                        return msg.Fail(ErrorCode.InvalidParams, "Missing sdk.elf path");
+                        return msg.Fail(ErrorCode.InvalidParams, "Missing PMFW package path");
                     }
 
                     if (_updateTaskRunning)
                     {
-                        return msg.Fail(ErrorCode.Busy, "Update already in progress");
+                        return msg.Fail(ErrorCode.Busy, "A firmware update is already running");
                     }
+                    _updateTaskRunning = true;
                      
                     // 启动后台任务，确保异常被捕获
-                    _ = Task.Run(async () =>
+                    try
                     {
-                        try
+                        _ = Task.Run(async () =>
                         {
-                            await ManualUpdateTask(bridge, data.Path, data.PreserveUserData, data.EnterUpgradeConfirmed);
-                        }
-                        catch (Exception ex)
-                        {
-                            bridge.BroadcastEvent(Module.Update, "log", new { text = $"[Error] Unhandled: {ex.Message}" });
-                            bridge.BroadcastEvent(Module.Update, "event", new { status = "error", error = ex.Message });
-                            _updateTaskRunning = false;
-                        }
-                    });
+                            try
+                            {
+                                await ManualUpdateTask(
+                                    bridge,
+                                    data.Path,
+                                    data.PreserveUserData,
+                                    data.EnterUpgradeConfirmed);
+                            }
+                            catch (Exception ex)
+                            {
+                                bridge.BroadcastEvent(Module.Update, "log", new { text = $"[Error] Unhandled: {ex.Message}" });
+                                bridge.BroadcastEvent(Module.Update, "event", new { status = "error", error = ex.Message });
+                                _updateTaskRunning = false;
+                            }
+                        });
+                    }
+                    catch
+                    {
+                        _updateTaskRunning = false;
+                        throw;
+                    }
 
                     return msg.Ok(new { status = "started" });
                 }
@@ -1116,7 +1132,7 @@ public static class HostCommandHandler
             {
                 try
                 {
-                    return await PickFileAsync(msg, "选择固件文件", new List<string> { ".elf", ".bin" });
+                    return await PickFileAsync(msg, "选择 PMFW 固件包", new List<string> { ".pmfw" });
                 }
                 catch (Exception ex)
                 {
@@ -1497,64 +1513,52 @@ public static class HostCommandHandler
             public bool Continue { get; set; }
         }
 
-        private static async Task ManualUpdateTask(MessageBridge bridge, string sdkElfPath, bool preserveUserData, bool enterUpgradeConfirmed)
+        private static async Task ManualUpdateTask(
+            MessageBridge bridge,
+            string pmfwPath,
+            bool preserveUserData,
+            bool enterUpgradeConfirmed)
         {
             _updateTaskRunning = true;
-            
             try
             {
-                bridge.BroadcastEvent(Module.Update, "log", new { text = $"[System] Update task started for: {sdkElfPath}" });
-                bridge.BroadcastEvent(Module.Update, "log", new { text = $"[System] Preserve user data: {(preserveUserData ? "YES" : "NO (format all)")}" });
-
-                // 1. 确定工作目录 - 只使用 appDir/Tools
-                var appDir = AppDomain.CurrentDomain.BaseDirectory;
-                var toolsDir = Path.Combine(appDir, "Tools");
-                
-                bridge.BroadcastEvent(Module.Update, "log", new { text = $"[System] AppDir: {appDir}" });
-                bridge.BroadcastEvent(Module.Update, "log", new { text = $"[System] Tools directory: {toolsDir}" });
-
-                if (!Directory.Exists(toolsDir))
+                var packagePath = Path.GetFullPath(pmfwPath);
+                bridge.BroadcastEvent(Module.Update, "isdUpdateProgress", new
                 {
-                    throw new DirectoryNotFoundException($"Tools directory not found at: {toolsDir}");
-                }
-            
-                bridge.BroadcastEvent(Module.Update, "log", new { text = $"[System] Using Tools directory: {toolsDir}" });
-
-                if (!File.Exists(sdkElfPath))
+                    stage = "OpeningPackage",
+                    percent = 0,
+                    message = $"正在打开并验证 PMFW：{packagePath}",
+                    completedUnits = 0,
+                    totalUnits = 0
+                });
+                using var package = IsdNativeClient.OpenPackage(packagePath);
+                bridge.BroadcastEvent(Module.Update, "log", new { text = $"[System] PMFW download started: {packagePath}" });
+                bridge.BroadcastEvent(Module.Update, "log", new { text = $"[System] Package SHA-256: {package.Metadata.PackageSha256}" });
+                bridge.BroadcastEvent(Module.Update, "log", new { text = $"[System] Firmware: {package.Metadata.FirmwareVersion} ({package.Metadata.Board})" });
+                bridge.BroadcastEvent(Module.Update, "log", new { text = $"[System] Build: {package.Metadata.BuildId}; type={package.Metadata.FirmwareType}; created={package.Metadata.CreatedUtc}" });
+                bridge.BroadcastEvent(Module.Update, "log", new { text = $"[System] Flash image: {package.Metadata.FlashLength} bytes; SHA-256={package.Metadata.FlashSha256}" });
+                bridge.BroadcastEvent(Module.Update, "log", new { text = $"[System] Loader: {package.Metadata.LoaderLength} bytes; SHA-256={package.Metadata.LoaderSha256}" });
+                bridge.BroadcastEvent(Module.Update, "log", new { text = $"[System] Preserve user data: {(preserveUserData ? "YES" : "NO (erase entire Flash)")}" });
+                bridge.BroadcastEvent(Module.Update, "isdUpdateProgress", new
                 {
-                    throw new FileNotFoundException($"Input sdk.elf not found at: {sdkElfPath}");
-                }
-                
-                // 验证关键工具
-                var requiredTools = new[] { "isd_download.exe", "llvm-objcopy.exe" };
-                foreach (var tool in requiredTools)
-                {
-                    if (!File.Exists(Path.Combine(toolsDir, tool)))
-                    {
-                         throw new FileNotFoundException($"Required tool not found in Tools dir: {tool}");
-                    }
-                }
+                    stage = "PackageValidated",
+                    percent = 0,
+                    message = $"PMFW 签名和内容校验通过：{package.Metadata.FirmwareVersion}，Flash {package.Metadata.FlashLength} 字节。",
+                    completedUnits = 0,
+                    totalUnits = 0
+                });
 
-                // 2. 执行固件生成流程 (模拟 download.bat)
-                
-                // 2.1 objcopy 生成 bin 文件 (直接使用 sdk.elf 绝对路径，无需拷贝)
-                string objcopyExe = "llvm-objcopy.exe";
-                string elfPath = sdkElfPath.Replace("\\", "/"); // 确保路径格式兼容
-                
-                // 生成 text.bin
-                await RunCommand(bridge, toolsDir, objcopyExe, $"-O binary -j .text \"{elfPath}\" text.bin");
-                // 生成 data.bin
-                await RunCommand(bridge, toolsDir, objcopyExe, $"-O binary -j .data \"{elfPath}\" data.bin");
-                // 生成 ram0_data.bin
-                await RunCommand(bridge, toolsDir, objcopyExe, $"-O binary -j .ram0_data \"{elfPath}\" ram0_data.bin");
-                // 生成 cache_ram_data.bin
-                await RunCommand(bridge, toolsDir, objcopyExe, $"-O binary -j .cache_ram_data \"{elfPath}\" cache_ram_data.bin");
-                
-                // 2.2 合并 bin (根据 download.bat: copy /b text.bin+data.bin+ram0_data.bin+cache_ram_data.bin app.bin)
-                await CombineFilesAsync(toolsDir, "app.bin", new[] { "text.bin", "data.bin", "ram0_data.bin", "cache_ram_data.bin" });
-                bridge.BroadcastEvent(Module.Update, "log", new { text = "[System] Generated app.bin" });
-                
-                // 3. 如果串口已连接，发送命令让设备自动进入升级模式
+                bridge.BroadcastEvent(Module.Update, "isdUpdateProgress", new
+                {
+                    stage = "CapturingDeviceBaseline",
+                    percent = 0,
+                    message = "正在记录当前 USB 设备，后续只接受本次新枚举的下载态设备。",
+                    completedUnits = 0,
+                    totalUnits = 0
+                });
+                using var deviceBaseline = IsdNativeClient.CaptureBaseline();
+
+                // Enter download mode through the existing device control workflow.
                 if (bridge.IsSerialConnected)
                 {
                     if (!enterUpgradeConfirmed)
@@ -1567,60 +1571,114 @@ public static class HostCommandHandler
                     }
 
                     bridge.BroadcastEvent(Module.Update, "log", new { text = "[System] Sending enterUpgradeMode command..." });
-                    
-                    // 构造进入升级模式的命令
-                    var enterUpgradeMsg = new Message
+                    bridge.BroadcastEvent(Module.Update, "isdUpdateProgress", new
                     {
-                        Version = 1,
-                        Id = Guid.NewGuid().ToString("N")[..8],
-                        Target = Target.Device,
-                        Type = MsgType.Request,
-                        Module = Module.Update,
-                        Cmd = "enterUpgradeMode",
-                        Data = System.Text.Json.JsonSerializer.SerializeToElement(new { }),
-                        Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
-                    };
+                        stage = "RequestingUpgradeMode",
+                        percent = 0,
+                        message = "正在通过已认证串口请求设备重启到 ISD 下载模式。",
+                        completedUnits = 0,
+                        totalUnits = 0
+                    });
                     
-                    // 发送命令
-                    bridge.SendToDevice(enterUpgradeMsg);
-                    bridge.BroadcastEvent(Module.Update, "log", new { text = "[System] Command sent, waiting for device to reboot (3s)..." });
-                    
-                    // 等待设备重启进入升级模式
-                    await Task.Delay(3000);
-                    
-                    bridge.BroadcastEvent(Module.Update, "log", new { text = "[System] Device should be in upgrade mode now" });
-                    if (!await RequestManualUpdateDeviceReadyConfirmationAsync(bridge))
+                    Message? enterUpgradeResponse = null;
+                    const int enterUpgradeAttempts = 3;
+                    for (var attempt = 1; attempt <= enterUpgradeAttempts; attempt++)
                     {
-                        throw new OperationCanceledException("用户取消开始烧录");
+                        var enterUpgradeMsg = new Message
+                        {
+                            Version = 1,
+                            Id = Guid.NewGuid().ToString("N")[..8],
+                            Target = Target.Device,
+                            Type = MsgType.Request,
+                            Module = Module.Update,
+                            Cmd = "enterUpgradeMode",
+                            Data = System.Text.Json.JsonSerializer.SerializeToElement(new { }),
+                            Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+                        };
+                        bridge.BroadcastEvent(Module.Update, "log", new
+                        {
+                            text = $"[System] enterUpgradeMode attempt {attempt}/{enterUpgradeAttempts}."
+                        });
+                        enterUpgradeResponse = await bridge.SendToDeviceAndWaitAsync(enterUpgradeMsg, 3000);
+                        if (enterUpgradeResponse != null || !bridge.IsSerialConnected)
+                        {
+                            break;
+                        }
+                        if (attempt < enterUpgradeAttempts)
+                        {
+                            await Task.Delay(250);
+                        }
                     }
 
-                    bridge.BroadcastEvent(Module.Update, "log", new { text = "[System] User confirmed device is in upgrade mode" });
+                    if (enterUpgradeResponse == null)
+                    {
+                        bridge.BroadcastEvent(Module.Update, "log", new
+                        {
+                            text = "[Warning] Device acknowledgement was not received after three attempts; continuing to wait for fresh ISD enumeration."
+                        });
+                    }
+                    else if (enterUpgradeResponse.Code != ErrorCode.Success)
+                    {
+                        throw new InvalidOperationException(
+                            $"设备拒绝进入烧录模式: {enterUpgradeResponse.Msg ?? $"错误码 {enterUpgradeResponse.Code}"}");
+                    }
+                    else
+                    {
+                        bridge.BroadcastEvent(Module.Update, "log", new { text = "[System] Device accepted enterUpgradeMode; waiting for Windows enumeration..." });
+                    }
                 }
                 else
                 {
-                    bridge.BroadcastEvent(Module.Update, "log", new { text = "[System] Serial port not connected, please manually enter upgrade mode (press upgrade button)" });
+                    bridge.BroadcastEvent(Module.Update, "log", new { text = "[System] Serial port not connected; waiting for an existing or manually entered download-mode device..." });
                 }
-                
-                // 4. 下载 (使用预置的资源目录: audlogo, ui_res, cfg)
-                var dataModeArgs = preserveUserData ? " -update_files normal" : " -format all";
-                var downloadArgs = $"isd_config.ini -gen2 -tonorflash -dev wl82 -boot 0x1c02000 -div1 -wait 300 -uboot uboot.boot -app app.bin cfg_tool.bin -res audlogo ui_res cfg -reboot 500{dataModeArgs} -extend-bin";
-                
-                bridge.BroadcastEvent(Module.Update, "log", new { text = "[System] Starting download..." });
-                bridge.BroadcastEvent(Module.Update, "log", new { text = $"[System] Command: isd_download.exe {downloadArgs}" });
-                var (downloadSuccess, downloadOutput) = await RunCommand(bridge, toolsDir, "isd_download.exe", 
-                    downloadArgs, 
-                    true);
-                
-                if (!downloadSuccess)
+
+                bridge.BroadcastEvent(Module.Update, "isdUpdateProgress", new
                 {
-                    // 提取错误信息
-                    string errorDetail = "Download failed";
-                    if (downloadOutput.Contains("Device Offline"))
+                    stage = IsdNativeClient.Stage.WaitingForDevice.ToString(),
+                    percent = 0,
+                    message = "等待 Windows 枚举 WL82 下载态设备...",
+                    completedUnits = 0,
+                    totalUnits = 0
+                });
+
+                var recoveryDirectory = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "PanelManager",
+                    "FirmwareRecovery");
+                Directory.CreateDirectory(recoveryDirectory);
+                var recoveryPath = Path.Combine(
+                    recoveryDirectory,
+                    $"{package.Metadata.PackageSha256}-{(preserveUserData ? "preserve" : "full-erase")}.json");
+                var progress = new Progress<IsdNativeClient.Progress>(value =>
+                {
+                    bridge.BroadcastEvent(Module.Update, "isdUpdateProgress", new
                     {
-                        errorDetail = "Device Offline - 设备未连接或未进入烧录模式";
-                    }
-                    throw new Exception(errorDetail);
-                }
+                        stage = value.Stage.ToString(),
+                        percent = value.Percent,
+                        message = value.Message,
+                        completedUnits = value.CompletedUnits,
+                        totalUnits = value.TotalUnits
+                    });
+                    bridge.BroadcastEvent(Module.Update, "log", new
+                    {
+                        text = value.TotalUnits > 0
+                            ? $"[ISD] {value.Percent}% {value.Stage} ({value.CompletedUnits}/{value.TotalUnits}): {value.Message}"
+                            : $"[ISD] {value.Percent}% {value.Stage}: {value.Message}"
+                    });
+                });
+                using var operation = IsdNativeClient.CreateOperation();
+                var result = await IsdNativeClient.DownloadAsync(
+                    package,
+                    deviceBaseline,
+                    operation,
+                    preserveUserData,
+                    recoveryPath,
+                    progress,
+                    CancellationToken.None).ConfigureAwait(false);
+                bridge.BroadcastEvent(Module.Update, "log", new
+                {
+                    text = $"[System] Native download completed: Flash UUID={result.FlashUuid}, updated={result.UpdatedSectors}, unchanged={result.UnchangedSectors}"
+                });
                 
                 bridge.BroadcastEvent(Module.Update, "event", new { status = "success" });
             }
@@ -1631,36 +1689,6 @@ public static class HostCommandHandler
             }
             finally
             {
-                // 清理临时文件 (无论成功或失败)
-                try
-                {
-                    var appDir = AppDomain.CurrentDomain.BaseDirectory;
-                    var toolsDir = Path.Combine(appDir, "Tools");
-                    var tempFiles = new[] { "text.bin", "data.bin", "ram0_data.bin", "cache_ram_data.bin", "app.bin" };
-                    
-                    bridge.BroadcastEvent(Module.Update, "log", new { text = "[System] Cleaning up temporary files..." });
-                    foreach (var tempFile in tempFiles)
-                    {
-                        var tempPath = Path.Combine(toolsDir, tempFile);
-                        if (File.Exists(tempPath))
-                        {
-                            try
-                            {
-                                File.Delete(tempPath);
-                            }
-                            catch (Exception cleanupEx)
-                            {
-                                bridge.BroadcastEvent(Module.Update, "log", new { text = $"[Warning] Could not delete {tempFile}: {cleanupEx.Message}" });
-                            }
-                        }
-                    }
-                    bridge.BroadcastEvent(Module.Update, "log", new { text = "[System] Cleanup complete." });
-                }
-                catch (Exception cleanupEx)
-                {
-                    bridge.BroadcastEvent(Module.Update, "log", new { text = $"[Warning] Cleanup error: {cleanupEx.Message}" });
-                }
-                
                 _updateTaskRunning = false;
                 bridge.BroadcastEvent(Module.Update, "log", new { text = "[System] Update task finished." });
             }
@@ -1687,154 +1715,6 @@ public static class HostCommandHandler
             }
 
             return await tcs.Task;
-        }
-
-        private static async Task<bool> RequestManualUpdateDeviceReadyConfirmationAsync(MessageBridge bridge)
-        {
-            var requestId = Guid.NewGuid().ToString("N");
-            var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _manualUpdateBootConfirmations[requestId] = tcs;
-
-            bridge.BroadcastEvent(Module.Update, "event", new
-            {
-                status = "confirm_upgrade_ready",
-                requestId,
-                message = "请确认设备已经重启并进入烧录模式。确认后才会开始写入固件。"
-            });
-
-            var completed = await Task.WhenAny(tcs.Task, Task.Delay(TimeSpan.FromMinutes(10)));
-            if (completed != tcs.Task)
-            {
-                _manualUpdateBootConfirmations.TryRemove(requestId, out _);
-                return false;
-            }
-
-            return await tcs.Task;
-        }
-
-        private static async Task CombineFilesAsync(string workDir, string outputFile, string[] inputFiles)
-        {
-             var outPath = Path.Combine(workDir, outputFile);
-             using var fsOut = new FileStream(outPath, FileMode.Create);
-             foreach (var inputFile in inputFiles)
-             {
-                 var inPath = Path.Combine(workDir, inputFile);
-                 // 容错：如果 section 文件不存在 (空 section)，跳过
-                 if (File.Exists(inPath))
-                 {
-                     using var fsIn = new FileStream(inPath, FileMode.Open);
-                     await fsIn.CopyToAsync(fsOut);
-                 }
-             }
-        }
-
-        private static async Task<(bool Success, string Output)> RunCommand(MessageBridge bridge, string workDir, string exeName, string args, bool checkOutput = false)
-        {
-            var psi = new ProcessStartInfo
-            {
-                FileName = Path.Combine(workDir, exeName),
-                Arguments = args,
-                WorkingDirectory = workDir,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                StandardOutputEncoding = System.Text.Encoding.UTF8,
-                StandardErrorEncoding = System.Text.Encoding.UTF8
-            };
-            
-            // 如果找不到exe，尝试直接用文件名(依赖PATH)
-            if (!File.Exists(psi.FileName))
-            {
-                psi.FileName = exeName;
-            }
-
-            bridge.BroadcastEvent(Module.Update, "log", new { text = $"> {exeName} {args}" });
-
-            var outputBuilder = new System.Text.StringBuilder();
-            var lineBuffer = new System.Text.StringBuilder();
-            
-            using var p = new Process { StartInfo = psi };
-            p.Start();
-
-            // 使用字符级读取实现实时输出
-            async Task ReadStreamAsync(StreamReader reader)
-            {
-                var buffer = new char[1];
-                while (!reader.EndOfStream)
-                {
-                    int read = await reader.ReadAsync(buffer, 0, 1);
-                    if (read > 0)
-                    {
-                        char c = buffer[0];
-                        lock (outputBuilder) { outputBuilder.Append(c); }
-                        
-                        if (c == '\n')
-                        {
-                            // 完整行，发送并清空缓冲
-                            var line = lineBuffer.ToString().TrimEnd('\r');
-                            if (!string.IsNullOrEmpty(line))
-                            {
-                                bridge.BroadcastEvent(Module.Update, "log", new { text = line });
-                            }
-                            lineBuffer.Clear();
-                        }
-                        else if (c == '\r')
-                        {
-                            // 回车符 - 发送当前内容（用于进度显示）
-                            var line = lineBuffer.ToString();
-                            if (!string.IsNullOrEmpty(line))
-                            {
-                                bridge.BroadcastEvent(Module.Update, "log", new { text = line });
-                            }
-                            lineBuffer.Clear();
-                        }
-                        else
-                        {
-                            lineBuffer.Append(c);
-                        }
-                    }
-                }
-                // 处理剩余内容
-                if (lineBuffer.Length > 0)
-                {
-                    bridge.BroadcastEvent(Module.Update, "log", new { text = lineBuffer.ToString() });
-                    lineBuffer.Clear();
-                }
-            }
-
-            var stdoutTask = ReadStreamAsync(p.StandardOutput);
-            var stderrTask = ReadStreamAsync(p.StandardError);
-
-            await Task.WhenAll(stdoutTask, stderrTask);
-            await p.WaitForExitAsync();
-
-            var output = outputBuilder.ToString();
-            
-            // 检查退出码
-            if (p.ExitCode != 0)
-            {
-                throw new Exception($"Command {exeName} failed with exit code {p.ExitCode}");
-            }
-            
-            // 如果需要检查输出内容
-            if (checkOutput)
-            {
-                // 定义错误关键词
-                var errorKeywords = new[] { "Device Offline", "ERROR", "failed", "Failed", "FAIL" };
-                // 定义成功关键词（至少要匹配一个才算成功）
-                var successKeywords = new[] { "Download completed", "rebooting device" };
-                
-                bool hasError = errorKeywords.Any(keyword => output.Contains(keyword));
-                bool hasSuccess = successKeywords.Any(keyword => output.Contains(keyword));
-                
-                if (hasError && !hasSuccess)
-                {
-                    return (false, output);
-                }
-            }
-            
-            return (true, output);
         }
 
         private static List<AppStartInfo> GetDesktopApps()
@@ -2803,7 +2683,7 @@ public static class HostCommandHandler
 
         /// <summary>
         /// 从可执行文件、DLL 或图标文件中提取图标
-        /// 这是一个未公开的 API，但广泛使用且稳定
+        /// 这是一个广泛使用且稳定的系统接口
         /// </summary>
         /// <param name="szFileName">文件路径</param>
         /// <param name="nIconIndex">图标索引 (0 = 第一个)</param>
