@@ -2,6 +2,8 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Maui.ApplicationModel;
 using PanelManager.Models;
@@ -22,17 +24,19 @@ namespace PanelManager.Services
     public class FloatingWindowManager
     {
         private MessageBridge? _bridge;
+        private readonly SemaphoreSlim _transitionGate = new(1, 1);
+        private readonly object _stateLock = new();
         private bool _isFloating;
+        private bool _floatingClientReady;
+        private bool _desiredFloating;
+        private string? _currentTransitionId;
+        private string? _floatingSessionToken;
+        private TaskCompletionSource<bool>? _readyCompletion;
+        private TaskCompletionSource<bool>? _visibleCompletion;
         private Process? _floatingWindowProcess;
-
-        private void HandleWsClientConnected()
-        {
-            // 悬浮窗进程可能在 show 广播之后才连上 WS；这里在新客户端连接时补发一次 show
-            if (_isFloating)
-            {
-                _bridge?.BroadcastEvent(Module.System, "floatingShow", null);
-            }
-        }
+        private const string FloatingTokenEnvironmentVariable = "PANELMANAGER_FLOATING_TOKEN";
+        private static readonly TimeSpan FloatingReadyTimeout = TimeSpan.FromSeconds(5);
+        private static readonly TimeSpan FloatingVisibleTimeout = TimeSpan.FromSeconds(3);
 
 #if WINDOWS
         private WinUIWindow? _mainWindow;
@@ -51,11 +55,11 @@ namespace PanelManager.Services
 
             if (_bridge != null)
             {
-                _bridge.OnWebSocketClientConnected -= HandleWsClientConnected;
+                _bridge.OnFloatingClientDisconnected -= HandleFloatingClientDisconnected;
             }
 
             _bridge = bridge;
-            _bridge.OnWebSocketClientConnected += HandleWsClientConnected;
+            _bridge.OnFloatingClientDisconnected += HandleFloatingClientDisconnected;
         }
 
         public void AttachMainWindow(object? window, object? appWindow)
@@ -66,7 +70,16 @@ namespace PanelManager.Services
 #endif
         }
 
-        public bool IsFloating => _isFloating;
+        public bool IsFloating
+        {
+            get
+            {
+                lock (_stateLock)
+                {
+                    return _isFloating;
+                }
+            }
+        }
 
         /// <summary>
         /// 初始化 WPF 悬浮窗进程（后台运行，不显示），在主窗加载后调用。
@@ -74,10 +87,36 @@ namespace PanelManager.Services
         public async Task<bool> InitializeFloatingWindowProcessAsync()
         {
 #if WINDOWS
-            if (_floatingWindowProcess != null)
+            Process? existingProcess;
+            lock (_stateLock)
             {
-                LogInfo("Floating window process already initialized");
-                return true;
+                existingProcess = _floatingWindowProcess;
+            }
+
+            if (existingProcess != null)
+            {
+                try
+                {
+                    if (!existingProcess.HasExited)
+                    {
+                        LogInfo("Floating window process already initialized");
+                        return true;
+                    }
+                }
+                catch (InvalidOperationException)
+                {
+                }
+
+                lock (_stateLock)
+                {
+                    if (ReferenceEquals(_floatingWindowProcess, existingProcess))
+                    {
+                        _floatingWindowProcess = null;
+                        _floatingSessionToken = null;
+                        _floatingClientReady = false;
+                    }
+                }
+                existingProcess.Dispose();
             }
 
             // 查找 FloatingWindow.exe
@@ -90,28 +129,64 @@ namespace PanelManager.Services
 
             try
             {
-                _floatingWindowProcess = new Process
+                if (_bridge == null)
                 {
-                    StartInfo = new ProcessStartInfo
-                    {
-                        FileName = exePath,
-                        Arguments = $"--parent-pid {Environment.ProcessId}",
-                        UseShellExecute = false,
-                        CreateNoWindow = true,
-                        WorkingDirectory = Path.GetDirectoryName(exePath),
-                        WindowStyle = ProcessWindowStyle.Hidden
-                    }
+                    return false;
+                }
+
+                var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = exePath,
+                    Arguments = $"--parent-pid {Environment.ProcessId}",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    WorkingDirectory = Path.GetDirectoryName(exePath),
+                    WindowStyle = ProcessWindowStyle.Hidden
                 };
+                startInfo.Environment[FloatingTokenEnvironmentVariable] = token;
 
-                _floatingWindowProcess.Start();
-                LogInfo($"Floating window process started (PID: {_floatingWindowProcess.Id})");
+                var process = new Process
+                {
+                    StartInfo = startInfo,
+                    EnableRaisingEvents = true
+                };
+                process.Exited += (_, _) => HandleFloatingProcessExited(process, token);
 
-                // 等待进程启动
-                await Task.Delay(1000);
+                _bridge.PrepareFloatingClientSession(token);
+                lock (_stateLock)
+                {
+                    _floatingWindowProcess = process;
+                    _floatingSessionToken = token;
+                    _floatingClientReady = false;
+                }
+
+                if (!process.Start())
+                {
+                    throw new InvalidOperationException("Floating window process did not start");
+                }
+
+                LogInfo($"Floating window process started (PID: {process.Id})");
+                await Task.CompletedTask;
                 return true;
             }
             catch (Exception ex)
             {
+                Process? failedProcess;
+                string? failedToken;
+                lock (_stateLock)
+                {
+                    failedProcess = _floatingWindowProcess;
+                    failedToken = _floatingSessionToken;
+                    _floatingWindowProcess = null;
+                    _floatingSessionToken = null;
+                    _floatingClientReady = false;
+                }
+                if (failedToken != null)
+                {
+                    _bridge?.ClearFloatingClientSession(failedToken);
+                }
+                failedProcess?.Dispose();
                 LogInfo($"Failed to start floating window process: {ex.Message}");
                 _bridge?.BroadcastEvent(Module.System, "floatingError", new { msg = $"无法启动悬浮窗进程: {ex.Message}" });
                 return false;
@@ -252,40 +327,88 @@ namespace PanelManager.Services
         public async Task<bool> EnterFloatingAsync()
         {
 #if WINDOWS
-            if (_isFloating)
+            await _transitionGate.WaitAsync();
+            try
             {
-                LogInfo("Already in floating mode");
-                return true;
-            }
-
-            if (_mainWindow == null || _mainAppWindow == null)
-            {
-                LogInfo("Main window not initialized");
-                return false;
-            }
-
-            // 确保悬浮窗进程已启动
-            if (_floatingWindowProcess == null || _floatingWindowProcess.HasExited)
-            {
-                var initialized = await InitializeFloatingWindowProcessAsync();
-                if (!initialized)
+                lock (_stateLock)
                 {
+                    if (_isFloating)
+                    {
+                        LogInfo("Already in floating mode");
+                        return true;
+                    }
+                }
+
+                if (_mainWindow == null || _mainAppWindow == null || _bridge == null)
+                {
+                    LogInfo("Main window or message bridge not initialized");
                     return false;
                 }
+
+                var transitionId = Guid.NewGuid().ToString("N");
+                TaskCompletionSource<bool> readyCompletion;
+                TaskCompletionSource<bool> visibleCompletion;
+                lock (_stateLock)
+                {
+                    _desiredFloating = true;
+                    _currentTransitionId = transitionId;
+                    readyCompletion = NewCompletionSource();
+                    visibleCompletion = NewCompletionSource();
+                    _readyCompletion = readyCompletion;
+                    _visibleCompletion = visibleCompletion;
+                    if (_floatingClientReady && _bridge.HasFloatingClient)
+                    {
+                        readyCompletion.TrySetResult(true);
+                    }
+                }
+
+                if (!await InitializeFloatingWindowProcessAsync() ||
+                    !await WaitForSignalAsync(readyCompletion, FloatingReadyTimeout))
+                {
+                    await RollBackFloatingEntryAsync("悬浮窗连接超时");
+                    return false;
+                }
+
+                var showSent = await _bridge.SendFloatingEventAsync(
+                    Module.System,
+                    "floatingShow",
+                    new { transitionId });
+                if (!showSent || !await WaitForSignalAsync(visibleCompletion, FloatingVisibleTimeout))
+                {
+                    await RollBackFloatingEntryAsync("悬浮窗显示超时");
+                    return false;
+                }
+
+                lock (_stateLock)
+                {
+                    if (!_floatingClientReady || !_bridge.HasFloatingClient)
+                    {
+                        visibleCompletion.TrySetResult(false);
+                        throw new InvalidOperationException("Floating client disconnected before main window was hidden");
+                    }
+                    _isFloating = true;
+                }
+
+                await MainThread.InvokeOnMainThreadAsync(() => _mainAppWindow.Hide());
+
+                lock (_stateLock)
+                {
+                    _readyCompletion = null;
+                    _visibleCompletion = null;
+                }
+                LogInfo("Entered floating mode");
+                return true;
             }
-
-            // 隐藏主窗口
-            await MainThread.InvokeOnMainThreadAsync(() =>
+            catch (Exception ex)
             {
-                _mainAppWindow.Hide();
-            });
-
-            // 通过 WebSocket 广播事件显示悬浮窗
-            _bridge?.BroadcastEvent(Module.System, "floatingShow", null);
-
-            _isFloating = true;
-            LogInfo("Entered floating mode");
-            return true;
+                LogInfo($"Enter floating failed: {ex.Message}");
+                await RollBackFloatingEntryAsync("进入悬浮模式失败");
+                return false;
+            }
+            finally
+            {
+                _transitionGate.Release();
+            }
 #else
             await Task.Delay(0);
             return false;
@@ -295,55 +418,294 @@ namespace PanelManager.Services
         public async Task<bool> RestoreFromFloatingAsync()
         {
 #if WINDOWS
-            if (_mainAppWindow == null || _mainWindow == null)
+            await _transitionGate.WaitAsync();
+            try
             {
-                LogInfo($"Restore ignored: mainAppWindow or mainWindow is null");
+                if (_mainAppWindow == null || _mainWindow == null)
+                {
+                    LogInfo("Restore ignored: mainAppWindow or mainWindow is null");
+                    return false;
+                }
+
+                lock (_stateLock)
+                {
+                    _desiredFloating = false;
+                    _readyCompletion?.TrySetResult(false);
+                    _visibleCompletion?.TrySetResult(false);
+                }
+
+                await ShowAndActivateMainWindowAsync();
+
+                var transitionId = Guid.NewGuid().ToString("N");
+                if (_bridge != null)
+                {
+                    var hideSent = await _bridge.SendFloatingEventAsync(
+                        Module.System,
+                        "floatingHide",
+                        new { transitionId });
+                    if (!hideSent)
+                    {
+                        LogInfo("Floating hide was not delivered; disconnect recovery will keep the main window visible");
+                    }
+                }
+
+                lock (_stateLock)
+                {
+                    _isFloating = false;
+                    _currentTransitionId = null;
+                    _readyCompletion = null;
+                    _visibleCompletion = null;
+                }
+                _bridge?.BroadcastEvent(Module.System, "floatingRestored", new { mode = "1080p" });
+                LogInfo("Restored from floating mode (1080p)");
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LogInfo($"Restore from floating failed: {ex.Message}");
                 return false;
             }
-
-            string mode = "1080p";
-
-            await MainThread.InvokeOnMainThreadAsync(() =>
+            finally
             {
-                var displayArea = DisplayArea.Primary;
-                var workArea = displayArea.WorkArea;
-
-                _mainAppWindow.Show();
-                _mainWindow.Activate();
-            });
-
-            // 通过 WebSocket 广播事件隐藏悬浮窗
-            _bridge?.BroadcastEvent(Module.System, "floatingHide", null);
-
-            _isFloating = false;
-            _bridge?.BroadcastEvent(Module.System, "floatingRestored", new { mode });
-            LogInfo($"Restored from floating mode ({mode})");
-
-            return true;
+                _transitionGate.Release();
+            }
 #else
             await Task.Delay(0);
             return false;
 #endif
         }
 
-        /// <summary>
-        /// 清理资源
-        /// </summary>
-        public void Dispose()
+        public void NotifyFloatingClientReady()
+        {
+            string? transitionId = null;
+            var shouldReshow = false;
+            var shouldHide = false;
+            lock (_stateLock)
+            {
+                _floatingClientReady = true;
+                _readyCompletion?.TrySetResult(true);
+                shouldReshow = _isFloating && _desiredFloating;
+                shouldHide = !_desiredFloating;
+                transitionId = _currentTransitionId;
+            }
+
+            if (shouldReshow && transitionId != null && _bridge != null)
+            {
+                _ = _bridge.SendFloatingEventAsync(
+                    Module.System,
+                    "floatingShow",
+                    new { transitionId });
+            }
+            else if (shouldHide && _bridge != null)
+            {
+                _ = _bridge.SendFloatingEventAsync(Module.System, "floatingHide", null);
+            }
+        }
+
+        public bool NotifyFloatingWindowVisible(string? transitionId, bool visible)
+        {
+            lock (_stateLock)
+            {
+                if (string.IsNullOrEmpty(transitionId) ||
+                    !string.Equals(transitionId, _currentTransitionId, StringComparison.Ordinal))
+                {
+                    return false;
+                }
+
+                _visibleCompletion?.TrySetResult(visible);
+                return true;
+            }
+        }
+
+        private static TaskCompletionSource<bool> NewCompletionSource()
+        {
+            return new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+
+        private static async Task<bool> WaitForSignalAsync(
+            TaskCompletionSource<bool> completion,
+            TimeSpan timeout)
         {
             try
             {
-                // 通知悬浮窗关闭
-                _bridge?.BroadcastEvent(Module.System, "floatingClose", null);
+                return await completion.Task.WaitAsync(timeout);
+            }
+            catch (TimeoutException)
+            {
+                return false;
+            }
+        }
 
-                // 等待一会儿让悬浮窗处理关闭
-                Task.Delay(500).Wait();
+        private async Task RollBackFloatingEntryAsync(string reason)
+        {
+            lock (_stateLock)
+            {
+                _desiredFloating = false;
+                _isFloating = false;
+                _currentTransitionId = null;
+                _readyCompletion = null;
+                _visibleCompletion = null;
+            }
 
-                if (_floatingWindowProcess != null && !_floatingWindowProcess.HasExited)
+            if (_mainAppWindow != null && _mainWindow != null)
+            {
+                await ShowAndActivateMainWindowAsync();
+            }
+            if (_bridge != null)
+            {
+                await _bridge.SendFloatingEventAsync(Module.System, "floatingHide", null);
+                _bridge.BroadcastEvent(Module.System, "floatingError", new { msg = reason });
+            }
+            LogInfo(reason);
+        }
+
+#if WINDOWS
+        private Task ShowAndActivateMainWindowAsync()
+        {
+            return MainThread.InvokeOnMainThreadAsync(() =>
+            {
+                _mainAppWindow!.Show();
+                _mainWindow!.Activate();
+            });
+        }
+#endif
+
+        private void HandleFloatingClientDisconnected()
+        {
+            var shouldRecover = false;
+            lock (_stateLock)
+            {
+                _floatingClientReady = false;
+                _readyCompletion?.TrySetResult(false);
+                _visibleCompletion?.TrySetResult(false);
+                shouldRecover = _isFloating;
+            }
+
+            if (shouldRecover)
+            {
+                _ = RecoverMainWindowAsync("悬浮窗连接已断开");
+            }
+        }
+
+        private void HandleFloatingProcessExited(Process process, string token)
+        {
+            lock (_stateLock)
+            {
+                if (!ReferenceEquals(_floatingWindowProcess, process))
                 {
-                    _floatingWindowProcess.Kill();
-                    _floatingWindowProcess.Dispose();
+                    return;
+                }
+
+                _floatingWindowProcess = null;
+                _floatingSessionToken = null;
+                _floatingClientReady = false;
+                _readyCompletion?.TrySetResult(false);
+                _visibleCompletion?.TrySetResult(false);
+            }
+
+            _bridge?.ClearFloatingClientSession(token);
+            try { process.Dispose(); } catch { }
+            _ = RecoverMainWindowAsync("悬浮窗进程已退出");
+        }
+
+        private async Task RecoverMainWindowAsync(string reason)
+        {
+#if WINDOWS
+            await _transitionGate.WaitAsync();
+            try
+            {
+                lock (_stateLock)
+                {
+                    if (!_isFloating)
+                    {
+                        return;
+                    }
+
+                    _desiredFloating = false;
+                    _isFloating = false;
+                    _currentTransitionId = null;
+                    _readyCompletion = null;
+                    _visibleCompletion = null;
+                }
+
+                if (_mainAppWindow != null && _mainWindow != null)
+                {
+                    await ShowAndActivateMainWindowAsync();
+                }
+                _bridge?.BroadcastEvent(Module.System, "floatingRestored", new { mode = "1080p", reason });
+                LogInfo(reason);
+            }
+            catch (Exception ex)
+            {
+                LogInfo($"Failed to recover main window: {ex.Message}");
+            }
+            finally
+            {
+                _transitionGate.Release();
+            }
+#else
+            await Task.CompletedTask;
+#endif
+        }
+
+        /// <summary>
+        /// 清理资源
+        /// </summary>
+        public async Task ShutdownAsync()
+        {
+            await _transitionGate.WaitAsync();
+            try
+            {
+                lock (_stateLock)
+                {
+                    _desiredFloating = false;
+                    _isFloating = false;
+                    _readyCompletion?.TrySetResult(false);
+                    _visibleCompletion?.TrySetResult(false);
+                }
+
+                if (_bridge != null)
+                {
+                    await _bridge.SendFloatingEventAsync(Module.System, "floatingClose", null);
+                }
+                await Task.Delay(200);
+
+                Process? process;
+                string? token;
+                lock (_stateLock)
+                {
+                    process = _floatingWindowProcess;
+                    token = _floatingSessionToken;
                     _floatingWindowProcess = null;
+                    _floatingSessionToken = null;
+                    _floatingClientReady = false;
+                    _currentTransitionId = null;
+                    _readyCompletion = null;
+                    _visibleCompletion = null;
+                }
+
+                if (token != null)
+                {
+                    _bridge?.ClearFloatingClientSession(token);
+                }
+                if (process != null)
+                {
+                    try
+                    {
+                        if (!process.HasExited)
+                        {
+                            process.Kill();
+                            await process.WaitForExitAsync();
+                        }
+                    }
+                    catch (InvalidOperationException)
+                    {
+                    }
+                    finally
+                    {
+                        process.Dispose();
+                    }
                 }
 
                 LogInfo("Floating window process stopped");
@@ -352,6 +714,15 @@ namespace PanelManager.Services
             {
                 LogInfo($"Error stopping floating window process: {ex.Message}");
             }
+            finally
+            {
+                _transitionGate.Release();
+            }
+        }
+
+        public void Dispose()
+        {
+            _ = ShutdownAsync();
         }
 
         private string? FindFloatingWindowExecutable()

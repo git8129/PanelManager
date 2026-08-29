@@ -12,7 +12,10 @@ namespace FloatingWindow
     {
         private WebSocketClient? _wsClient;
         private readonly int _parentProcessId;
+        private readonly string? _floatingSessionToken;
         private readonly System.Windows.Threading.DispatcherTimer _parentWatchTimer;
+        private int _commandInProgress;
+        private const string FloatingTokenEnvironmentVariable = "PANELMANAGER_FLOATING_TOKEN";
 
         // Win32 API 导入
 
@@ -46,6 +49,8 @@ namespace FloatingWindow
             InitializeComponent();
 
             _parentProcessId = TryGetParentProcessId();
+            _floatingSessionToken = Environment.GetEnvironmentVariable(FloatingTokenEnvironmentVariable);
+            Environment.SetEnvironmentVariable(FloatingTokenEnvironmentVariable, null);
             _parentWatchTimer = new System.Windows.Threading.DispatcherTimer
             {
                 Interval = TimeSpan.FromSeconds(2)
@@ -56,7 +61,15 @@ namespace FloatingWindow
             // 初始化 WebSocket 客户端
             _wsClient = new WebSocketClient("ws://localhost:5000");
             _wsClient.OnEvent += OnWebSocketEvent;
+            _wsClient.OnConnected += OnWebSocketConnected;
+            _wsClient.OnDisconnected += OnWebSocketDisconnected;
             _wsClient.OnConnectionLost += OnConnectionLost;
+
+            if (string.IsNullOrWhiteSpace(_floatingSessionToken) || _parentProcessId <= 0)
+            {
+                Dispatcher.BeginInvoke(() => Application.Current.Shutdown());
+                return;
+            }
 
             // 连接到主程序
             _ = ConnectToMainAppAsync();
@@ -118,6 +131,31 @@ namespace FloatingWindow
             {
                 Application.Current.Shutdown();
             });
+        }
+
+        private async void OnWebSocketConnected()
+        {
+            try
+            {
+                var response = await _wsClient!.SendRequestAsync(
+                    "System",
+                    "floatingReady",
+                    new
+                    {
+                        token = _floatingSessionToken,
+                        parentPid = _parentProcessId,
+                        clientPid = Environment.ProcessId
+                    },
+                    5000);
+                if (response != null && response.Code > 0)
+                {
+                    Dispatcher.Invoke(() => Application.Current.Shutdown());
+                }
+            }
+            catch
+            {
+                Dispatcher.Invoke(() => Application.Current.Shutdown());
+            }
         }
 
         private void Window_Loaded(object sender, RoutedEventArgs e)
@@ -303,14 +341,21 @@ namespace FloatingWindow
 
         private void OnWebSocketEvent(string eventName, System.Text.Json.JsonElement data)
         {
+            string? visibleTransitionId = null;
             Dispatcher.Invoke(() =>
             {
                 switch (eventName)
                 {
                     case "floatingShow":
+                        if (data.ValueKind == System.Text.Json.JsonValueKind.Object &&
+                            data.TryGetProperty("transitionId", out var transitionProperty))
+                        {
+                            visibleTransitionId = transitionProperty.GetString();
+                        }
                         Visibility = Visibility.Visible;
                         Activate();
                         Topmost = true;
+                        UpdateLayout();
                         break;
                     case "floatingHide":
                         Visibility = Visibility.Hidden;
@@ -320,6 +365,14 @@ namespace FloatingWindow
                         break;
                 }
             });
+
+            if (eventName == "floatingShow" && !string.IsNullOrEmpty(visibleTransitionId))
+            {
+                _ = _wsClient?.SendRequestAsync(
+                    "System",
+                    "floatingVisible",
+                    new { transitionId = visibleTransitionId, visible = true });
+            }
         }
 
         private void OnConnectionLost()
@@ -330,10 +383,29 @@ namespace FloatingWindow
             });
         }
 
-        private void SendCommandToMainApp(string action)
+        private void OnWebSocketDisconnected()
         {
-            // 通过 WebSocket 发送命令到主程序 (统一使用 System 模块)
-            _ = _wsClient?.SendAsync("System", action, null);
+            Dispatcher.Invoke(() => Visibility = Visibility.Hidden);
+        }
+
+        private async Task SendCommandToMainAppAsync(string action)
+        {
+            if (Interlocked.Exchange(ref _commandInProgress, 1) != 0)
+            {
+                return;
+            }
+
+            try
+            {
+                if (_wsClient != null)
+                {
+                    await _wsClient.SendRequestAsync("System", action, null, 5000);
+                }
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _commandInProgress, 0);
+            }
         }
 
         protected override void OnClosed(EventArgs e)
@@ -343,16 +415,16 @@ namespace FloatingWindow
             base.OnClosed(e);
         }
 
-        private void Window_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+        private async void Window_MouseDoubleClick(object sender, MouseButtonEventArgs e)
         {
-            SendCommandToMainApp("floatingRestore");
+            await SendCommandToMainAppAsync("floatingRestore");
             e.Handled = true;
         }
 
         // 右键菜单事件处理
-        private void MenuItem_Restore_Click(object sender, RoutedEventArgs e)
+        private async void MenuItem_Restore_Click(object sender, RoutedEventArgs e)
         {
-            SendCommandToMainApp("floatingRestore");
+            await SendCommandToMainAppAsync("floatingRestore");
         }
 
         private void MenuItem_ChangeIcon_Click(object sender, RoutedEventArgs e)
@@ -379,7 +451,7 @@ namespace FloatingWindow
             }
         }
 
-        private void MenuItem_ExitApp_Click(object sender, RoutedEventArgs e)
+        private async void MenuItem_ExitApp_Click(object sender, RoutedEventArgs e)
         {
             var result = MessageBox.Show(
                 "确定要退出整个程序吗？\n这将关闭悬浮窗和主程序。",
@@ -389,7 +461,7 @@ namespace FloatingWindow
 
             if (result == MessageBoxResult.Yes)
             {
-                SendCommandToMainApp("floatingExitAll");
+                await SendCommandToMainAppAsync("floatingExitAll");
                 // floatingClose 事件会由主程序发送，触发窗口关闭
             }
         }
