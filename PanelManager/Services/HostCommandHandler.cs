@@ -18,6 +18,7 @@ using System.Runtime.InteropServices;
 
 #if WINDOWS
 using Windows.Media.Control;
+using Windows.Storage.Streams;
 #endif
 
 namespace PanelManager.Services
@@ -57,7 +58,7 @@ public static class HostCommandHandler
 
             bridge.On(Module.System, "status", _ => new
             {
-                serial = new { open = bridge.IsSerialConnected, physicalOpen = bridge.IsSerialOpen, port = bridge.CurrentPort },
+                serial = new { open = bridge.IsSerialConnected, physicalOpen = bridge.IsSerialOpen, port = bridge.CurrentPort, usbId = bridge.CurrentUsbId },
                 version = "1.0.0",
                 bootNotice = MessageBridgeText.GetBootNotice()
             });
@@ -590,6 +591,24 @@ public static class HostCommandHandler
             });
 
             // ===== 悬浮窗 → 主程序命令 =====
+            bridge.On(Module.System, "floatingReady", msg =>
+            {
+                floatingWindowManager.NotifyFloatingClientReady();
+                return msg.Ok(new { ready = true });
+            });
+
+            bridge.On(Module.System, "floatingVisible", msg =>
+            {
+                var data = msg.GetData<FloatingVisibleRequest>();
+                if (data == null ||
+                    !floatingWindowManager.NotifyFloatingWindowVisible(data.TransitionId, data.Visible))
+                {
+                    return msg.Fail(ErrorCode.InvalidRequest, "Floating visibility acknowledgement is stale or invalid");
+                }
+
+                return msg.Ok(new { acknowledged = true });
+            });
+
             bridge.On(Module.System, "floatingRestore", async msg =>
             {
                 try
@@ -608,12 +627,12 @@ public static class HostCommandHandler
             bridge.On(Module.System, "floatingExitAll", msg =>
             {
                 bridge.BroadcastEvent(Module.System, "appExit", null);
-                floatingWindowManager.Dispose();
 
                 // 延迟退出，确保响应能发送出去
                 Task.Run(async () =>
                 {
                     await Task.Delay(200);
+                    await floatingWindowManager.ShutdownAsync();
                     Microsoft.Maui.Controls.Application.Current?.Quit();
                 });
 
@@ -949,11 +968,11 @@ public static class HostCommandHandler
                 // 如果已连接，返回当前状态
                 if (bridge.IsSerialConnected)
                 {
-                    return Task.FromResult(msg.Ok(new { port = bridge.CurrentPort, status = "connected" }));
+                    return Task.FromResult(msg.Ok(new { port = bridge.CurrentPort, usbId = bridge.CurrentUsbId, status = "connected" }));
                 }
                 if (bridge.IsSerialOpen)
                 {
-                    return Task.FromResult(msg.Ok(new { port = bridge.CurrentPort, status = "listening" }));
+                    return Task.FromResult(msg.Ok(new { port = bridge.CurrentPort, usbId = bridge.CurrentUsbId, status = "listening" }));
                 }
                 else
                 {
@@ -1042,6 +1061,14 @@ public static class HostCommandHandler
                 }
             });
             // ===== 手动固件更新 (发送到上位机处理) =====
+            bridge.On(Module.System, "manualUpdatePreflight", _ => new
+            {
+                downloadModePresent = bridge.HasDownloadModeDevice(),
+                serialConnected = bridge.IsSerialConnected,
+                port = bridge.CurrentPort,
+                usbId = bridge.CurrentUsbId
+            });
+
             bridge.On(Module.System, "manualUpdate", msg =>
             {
                 try
@@ -1556,11 +1583,17 @@ public static class HostCommandHandler
                     completedUnits = 0,
                     totalUnits = 0
                 });
+                var downloadModePresent = bridge.HasDownloadModeDevice();
                 using var deviceBaseline = IsdNativeClient.CaptureBaseline();
 
                 // Enter download mode through the existing device control workflow.
-                if (bridge.IsSerialConnected)
+                if (bridge.IsSerialConnected && !downloadModePresent)
                 {
+                    if (bridge.CurrentUsbId != 0)
+                    {
+                        throw new InvalidOperationException(
+                            "当前串口不是 USB0。请翻转 Type-C 插头，等待状态栏显示 USB1.1 后再重试烧录。");
+                    }
                     if (!enterUpgradeConfirmed)
                     {
                         bridge.BroadcastEvent(Module.Update, "log", new { text = "[System] Serial port connected, waiting for user confirmation before rebooting device..." });
@@ -1626,6 +1659,13 @@ public static class HostCommandHandler
                     {
                         bridge.BroadcastEvent(Module.Update, "log", new { text = "[System] Device accepted enterUpgradeMode; waiting for Windows enumeration..." });
                     }
+                }
+                else if (downloadModePresent)
+                {
+                    bridge.BroadcastEvent(Module.Update, "log", new
+                    {
+                        text = "[System] Existing ISD download-mode device detected; serial reboot is not required."
+                    });
                 }
                 else
                 {
@@ -2323,13 +2363,14 @@ public static class HostCommandHandler
             {
                 var mediaProperties = await session.TryGetMediaPropertiesAsync();
                 var playbackInfo = session.GetPlaybackInfo();
+                var thumbnail = await ReadSmtcThumbnailDataUriAsync(mediaProperties?.Thumbnail);
 
                 return new
                 {
                     title = mediaProperties?.Title ?? "未知标题",
                     artist = mediaProperties?.Artist ?? "未知艺术家",
                     album = mediaProperties?.AlbumTitle ?? "",
-                    thumbnail = (string?)null,
+                    thumbnail,
                     isPlaying = playbackInfo?.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing
                 };
             }
@@ -2337,6 +2378,47 @@ public static class HostCommandHandler
             {
                 _ = ex;
                 return new { title = "未知标题", artist = "未知艺术家", album = "", thumbnail = (string?)null, isPlaying = false };
+            }
+        }
+
+        private static async Task<string?> ReadSmtcThumbnailDataUriAsync(IRandomAccessStreamReference? thumbnailReference)
+        {
+            const ulong maxThumbnailBytes = 4 * 1024 * 1024;
+            if (thumbnailReference == null)
+            {
+                return null;
+            }
+
+            try
+            {
+                using var stream = await thumbnailReference.OpenReadAsync();
+                if (stream.Size == 0 || stream.Size > maxThumbnailBytes)
+                {
+                    return null;
+                }
+
+                var byteCount = checked((uint)stream.Size);
+                var bytes = new byte[byteCount];
+                using var reader = new DataReader(stream.GetInputStreamAt(0));
+                var loaded = await reader.LoadAsync(byteCount);
+                if (loaded != byteCount)
+                {
+                    return null;
+                }
+
+                reader.ReadBytes(bytes);
+                var contentType = stream.ContentType;
+                if (string.IsNullOrWhiteSpace(contentType) ||
+                    !contentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+                {
+                    contentType = "image/jpeg";
+                }
+
+                return $"data:{contentType};base64,{Convert.ToBase64String(bytes)}";
+            }
+            catch
+            {
+                return null;
             }
         }
 #endif
@@ -2517,26 +2599,18 @@ public static class HostCommandHandler
                 }
             }
 
-            using var response = await WeatherHttp.GetAsync("https://ipapi.co/json/");
-            response.EnsureSuccessStatusCode();
-
-            var content = await response.Content.ReadAsStringAsync();
-            using var doc = JsonDocument.Parse(content);
-            var root = doc.RootElement;
-
-            var latitude = TryGetDouble(root, "latitude");
-            var longitude = TryGetDouble(root, "longitude");
-            var city = TryGetString(root, "city");
-            var region = TryGetString(root, "region");
-            var country = TryGetString(root, "country_name");
-
-            var locationName = BuildLocationName(city, region, country);
-            var location = new WeatherLocation
+            WeatherLocation location;
+            try
             {
-                Latitude = latitude,
-                Longitude = longitude,
-                Name = locationName
-            };
+                // ipwho.is is a public, keyless endpoint. It is the primary
+                // locator because ipapi.co can rate-limit shared/public IPs.
+                location = await FetchIpWhoLocationAsync();
+            }
+            catch
+            {
+                // Keep a keyless fallback for networks where ipwho.is is blocked.
+                location = await FetchIpApiLocationAsync();
+            }
 
             lock (WeatherLock)
             {
@@ -2545,6 +2619,54 @@ public static class HostCommandHandler
             }
 
             return location;
+        }
+
+        private static async Task<WeatherLocation> FetchIpWhoLocationAsync()
+        {
+            using var response = await WeatherHttp.GetAsync("https://ipwho.is/");
+            response.EnsureSuccessStatusCode();
+
+            var content = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(content);
+            var root = doc.RootElement;
+            if (root.TryGetProperty("success", out var success)
+                && success.ValueKind == JsonValueKind.False)
+            {
+                var message = TryGetString(root, "message") ?? "ipwho.is location lookup failed";
+                throw new InvalidOperationException(message);
+            }
+
+            return CreateWeatherLocation(root, "country");
+        }
+
+        private static async Task<WeatherLocation> FetchIpApiLocationAsync()
+        {
+            using var response = await WeatherHttp.GetAsync("https://ipapi.co/json/");
+            response.EnsureSuccessStatusCode();
+
+            var content = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(content);
+            return CreateWeatherLocation(doc.RootElement, "country_name");
+        }
+
+        private static WeatherLocation CreateWeatherLocation(JsonElement root, string countryPropertyName)
+        {
+            var latitude = TryGetDouble(root, "latitude");
+            var longitude = TryGetDouble(root, "longitude");
+            if (latitude is < -90 or > 90 || longitude is < -180 or > 180)
+            {
+                throw new InvalidOperationException("Location coordinates are out of range");
+            }
+
+            var city = TryGetString(root, "city");
+            var region = TryGetString(root, "region");
+            var country = TryGetString(root, countryPropertyName);
+            return new WeatherLocation
+            {
+                Latitude = latitude,
+                Longitude = longitude,
+                Name = BuildLocationName(city, region, country)
+            };
         }
 
         private static async Task<WeatherSnapshot> FetchWeatherAsync(WeatherLocation location)
@@ -2887,5 +3009,11 @@ public static class HostCommandHandler
     public class NoActivateRequest
     {
         public bool Enable { get; set; }
+    }
+
+    public class FloatingVisibleRequest
+    {
+        public string? TransitionId { get; set; }
+        public bool Visible { get; set; }
     }
 }
