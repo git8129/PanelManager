@@ -23,7 +23,6 @@ PanelManager 是一个基于 .NET MAUI + BlazorWebView 的桌面副屏控制面�
 ## 上下位机边界
 
 - 本仓库是桌面上位机。WiFi、蓝牙、音频、RK628、USB/HID 等页面主要负责向下位机发送协议命令并展示结果。
-- 当前网络唤醒由配套下位机提供内置 HTTP 页面和 API，并由下位机 WiFi 直接发送 WOL Magic Packet；桌面端没有 WOL UI、协议命令或 UDP 发包实现。
 - 贡献和自动化开发规范记录在仓库 `AGENTS.md`。
 
 ## 技术栈

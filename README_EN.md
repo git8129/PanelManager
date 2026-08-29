@@ -29,7 +29,6 @@ hardware implementation.
 ## Host And Device Boundary
 
 - This repository contains the desktop host. Its Wi-Fi, Bluetooth, audio, RK628, and USB/HID pages primarily send device protocol commands and display results.
-- Network wake is implemented by that companion firmware: the device serves its own HTTP UI and API, then sends WOL Magic Packets through device Wi-Fi. The desktop host has no WOL UI, protocol command, or UDP sender.
 - Contribution and coding-agent guidance is documented in `AGENTS.md`.
 
 ## Technology
@@ -90,7 +89,7 @@ The published directory contains:
 ## Build the Installer
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\package-windows-installer.ps1 -WatermarkText ""
+powershell -ExecutionPolicy Bypass -File .\scripts\package-windows-installer.ps1
 ```
 
 Default installer output:

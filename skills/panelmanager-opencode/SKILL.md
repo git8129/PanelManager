@@ -69,7 +69,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\publish-windows-cli.ps1
 生成安装包：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\package-windows-installer.ps1 -WatermarkText ""
+powershell -ExecutionPolicy Bypass -File .\scripts\package-windows-installer.ps1
 ```
 
 仅改前端主脚本：
@@ -88,9 +88,7 @@ node --check .\PanelManager\wwwroot\ui_misc.js
 
 - “编译项目 / 编一下 / 重新编译” -> 直接执行 `build-windows-cli.ps1`。
 - “发布 / 出发布目录” -> 直接执行 `publish-windows-cli.ps1`。
-- “打包 / 安装包 / 给普通用户安装” -> 直接执行 `package-windows-installer.ps1 -WatermarkText ""`。
-- “测试版 / 带水印 / 内测包” -> 使用 `-WatermarkText "测试版本"`，只在打包 staging 中注入水印。
-- “普通安装包”且用户未明确要求水印 -> 使用 `-WatermarkText ""`，覆盖脚本的默认测试水印。
+- “打包 / 安装包 / 给普通用户安装” -> 直接执行 `package-windows-installer.ps1`。
 - “这个版本可以了 / 就这样发版 / 交付” -> 主动提示生成图形化安装包。
 - “修 Bug / 排查错误” -> 先定位首错，再修改和验证。
 - “新增功能” -> 做最小可运行实现，保留现有设计语言和交互结构。
@@ -130,8 +128,6 @@ node --check .\PanelManager\wwwroot\ui_misc.js
 
 - 安装器默认用户级安装，不应要求管理员权限。
 - 安装器 payload 来自发布产物 staging，不直接修改源码目录。
-- 普通安装包规则是不带水印；调用现有脚本时必须显式使用 `-WatermarkText ""`，覆盖默认测试水印。
-- `-WatermarkText` 只影响 staging 中的 `wwwroot/index.html`。
 - payload 默认排除 PDB/XML/winmd、无用 splash/dotnet_bot/workloads 资源，以及除 `en*`、`zh*` 外的语言资源目录。
 - 如果标准输出名 `PanelManagerSetup.exe` 被系统拒绝写入，脚本可输出带时间戳的 `PanelManagerSetup-*.exe`。
 
