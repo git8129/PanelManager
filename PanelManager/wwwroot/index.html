@@ -6,6 +6,8 @@
     <meta name="viewport" content="width=1920, height=1080, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Smart Touch Bar</title>
     <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="ui_tokens.css">
+    <link rel="stylesheet" href="ui_components.css">
 </head>
 
 <body>
@@ -25,7 +27,14 @@
         <div class="status-bar glass-md">
             <div class="status-group">
                 <span class="status-item">
-                    <span class="status-icon">📶</span>
+                    <span class="status-icon wifi-status-signal" id="wifiStatusIcon" data-level="0"
+                        aria-label="Wi-Fi 未连接" title="Wi-Fi 未连接">
+                        <span class="wifi-signal-bar"></span>
+                        <span class="wifi-signal-bar"></span>
+                        <span class="wifi-signal-bar"></span>
+                        <span class="wifi-signal-bar"></span>
+                        <span class="wifi-signal-bar"></span>
+                    </span>
                     <span id="wifiStatus">未连接</span>
                 </span>
                 <span class="status-item">
@@ -35,6 +44,7 @@
                 <span class="status-item">
                     <span class="status-icon" id="serialStatusIcon">🔌</span>
                     <span id="serialStatus">串口未连接</span>
+                    <span class="usb-port-indicator" id="usbPortIndicator" hidden></span>
                 </span>
             </div>
             <div class="status-group">
@@ -80,15 +90,34 @@
                                         <div class="text-ellipsis-muted" id="musicArtist">等待媒体信息...</div>
                                     </div>
                                     <div class="music-controls-large">
-                                        <button class="btn-base btn-circle btn-xs btn-translucent btn-scale-strong"
-                                            onclick="musicPrev()">⏮</button>
-                                        <button class="btn-base btn-circle btn-sm btn-primary btn-scale-strong"
-                                            onclick="musicPlayPause()" id="musicPlayBtn">▶</button>
-                                        <button class="btn-base btn-circle btn-xs btn-translucent btn-scale-strong"
-                                            onclick="musicNext()">⏭</button>
-                                        <button class="btn-base btn-circle btn-xs btn-translucent btn-scale-strong"
+                                        <button class="btn-base btn-circle btn-xs btn-translucent btn-scale-strong music-control-button"
+                                            type="button" onclick="musicPrev()" aria-label="上一首" title="上一首">
+                                            <svg class="music-control-icon" viewBox="0 0 24 24" aria-hidden="true">
+                                                <path d="M5 5h2v14H5V5Zm3.5 7 10-7v14l-10-7Z" />
+                                            </svg>
+                                        </button>
+                                        <button class="btn-base btn-circle btn-sm btn-primary btn-scale-strong music-control-button music-control-button-play"
+                                            type="button" onclick="musicPlayPause()" id="musicPlayBtn" aria-label="播放" title="播放">
+                                            <svg class="music-control-icon music-control-icon-play" viewBox="0 0 24 24" aria-hidden="true">
+                                                <path d="M7 4.5v15l12-7.5L7 4.5Z" />
+                                            </svg>
+                                            <svg class="music-control-icon music-control-icon-pause" viewBox="0 0 24 24" aria-hidden="true">
+                                                <path d="M6 5h4v14H6V5Zm8 0h4v14h-4V5Z" />
+                                            </svg>
+                                        </button>
+                                        <button class="btn-base btn-circle btn-xs btn-translucent btn-scale-strong music-control-button"
+                                            type="button" onclick="musicNext()" aria-label="下一首" title="下一首">
+                                            <svg class="music-control-icon" viewBox="0 0 24 24" aria-hidden="true">
+                                                <path d="m5.5 5 10 7-10 7V5ZM17 5h2v14h-2V5Z" />
+                                            </svg>
+                                        </button>
+                                        <button class="btn-base btn-circle btn-xs btn-translucent btn-scale-strong music-control-button"
                                             onclick="switchMediaSession()" id="mediaSwitchBtn"
-                                            style="display: none;">🔄</button>
+                                            type="button" aria-label="切换媒体会话" title="切换媒体会话" style="display: none;">
+                                            <svg class="music-control-icon" viewBox="0 0 24 24" aria-hidden="true">
+                                                <path d="M7.5 5H16l-2-2 1.4-1.4L19.8 6l-4.4 4.4L14 9l2-2H7.5A3.5 3.5 0 0 0 4 10.5H2A5.5 5.5 0 0 1 7.5 5Zm9 14H8l2 2-1.4 1.4L4.2 18l4.4-4.4L10 15l-2 2h8.5a3.5 3.5 0 0 0 3.5-3.5h2a5.5 5.5 0 0 1-5.5 5.5Z" />
+                                            </svg>
+                                        </button>
                                     </div>
                                 </div>
                             </div>
@@ -139,26 +168,35 @@
                             onclick="openPage('monitor')">
                             <div class="perf-widget-large">
                                 <div class="perf-overview">
-                                    <div class="perf-item-large">
+                                    <div class="perf-item-large perf-item-large--cpu">
                                         <div class="perf-info">
                                             <span class="perf-label">💻 CPU</span>
                                             <span class="perf-value" id="miniCpuValue">45%</span>
                                         </div>
-                                        <div class="mini-chart" id="miniCpuChart"></div>
+                                        <div class="mini-chart" id="miniCpuChart" role="progressbar"
+                                            aria-label="CPU 使用率" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                                            <span class="mini-chart-fill"></span>
+                                        </div>
                                     </div>
-                                    <div class="perf-item-large">
+                                    <div class="perf-item-large perf-item-large--memory">
                                         <div class="perf-info">
                                             <span class="perf-label">🧠 内存</span>
                                             <span class="perf-value" id="miniMemValue">8.2 GB</span>
                                         </div>
-                                        <div class="mini-chart" id="miniMemChart"></div>
+                                        <div class="mini-chart" id="miniMemChart" role="progressbar"
+                                            aria-label="内存使用率" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                                            <span class="mini-chart-fill"></span>
+                                        </div>
                                     </div>
-                                    <div class="perf-item-large">
+                                    <div class="perf-item-large perf-item-large--temperature">
                                         <div class="perf-info">
                                             <span class="perf-label">🌡️ 温度</span>
-                                            <span class="perf-value" id="miniTempValue">62°C</span>
+                                            <span class="perf-value" id="miniTempValue">N/A</span>
                                         </div>
-                                        <div class="mini-chart" id="miniTempChart"></div>
+                                        <div class="mini-chart" id="miniTempChart" role="progressbar"
+                                            aria-label="CPU 温度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                                            <span class="mini-chart-fill"></span>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -169,7 +207,7 @@
                             <div class="notes-container">
                                 <div class="notes-header">
                                     <span>📝 便签</span>
-                                    <button class="btn-base btn-primary btn-compact" onclick="addTodoItem()">+
+                                    <button class="btn-base note-button note-button--primary" onclick="addTodoItem()">+
                                         待办</button>
                                 </div>
                                 <textarea class="textarea-base" id="notesTextarea"
@@ -946,9 +984,9 @@
                             <p>先把界面切到设备屏幕，然后启动 Windows 触摸屏归属校准。按系统提示确认这块触摸屏属于当前显示器后，再进入坐标采样。</p>
                         </div>
                         <div class="touch-cal-actions">
-                            <button class="btn-base btn-primary btn-lg" type="button" onclick="touchCal2SwitchToDeviceScreen()">切换到设备屏幕</button>
-                            <button class="btn-base btn-tonal btn-lg" type="button" onclick="touchCal2LaunchWindowsTouchMapper()">启动屏幕归属校准</button>
-                            <button class="btn-base btn-glass btn-lg" type="button" onclick="touchCal2GoCoordinateStep()">已完成屏幕确认，下一步</button>
+                            <button class="btn-base touch-cal-action touch-cal-action--primary" type="button" onclick="touchCal2SwitchToDeviceScreen()">切换到设备屏幕</button>
+                            <button class="btn-base touch-cal-action touch-cal-action--secondary" type="button" onclick="touchCal2LaunchWindowsTouchMapper()">启动屏幕归属校准</button>
+                            <button class="btn-base touch-cal-action touch-cal-action--next" type="button" onclick="touchCal2GoCoordinateStep()">已完成屏幕确认，下一步</button>
                         </div>
                         <div class="touch-cal-status" id="touchCalScreenStatus">请先确认触摸屏归属到设备屏幕，再继续下一步。</div>
                     </section>
@@ -971,8 +1009,8 @@
                                 <span>保存到下位机 Flash</span>
                             </label>
                             <div class="touch-cal-actions compact">
-                                <button class="btn-base btn-primary btn-lg" id="touchCalStartBtn" type="button" onclick="touchCal2Start()">开始采样</button>
-                                <button class="btn-base btn-tonal btn-lg" id="touchCalStopBtn" type="button" onclick="touchCal2Stop()">停止</button>
+                                <button class="btn-base touch-cal-action touch-cal-action--primary" id="touchCalStartBtn" type="button" onclick="touchCal2Start()">开始采样</button>
+                                <button class="btn-base touch-cal-action touch-cal-action--secondary" id="touchCalStopBtn" type="button" onclick="touchCal2Stop()">停止</button>
                             </div>
                         </div>
                         <div class="touch-cal-status" id="touchCalCoordStatus">准备就绪。请先点击“开始采样”。</div>
@@ -984,7 +1022,7 @@
                             <h3>触摸坐标已校准</h3>
                             <p id="touchCalDoneText">配置已写入下位机，触摸输出现在使用横屏坐标。</p>
                             <div class="touch-cal-actions">
-                                <button class="btn-base btn-primary btn-lg" type="button" onclick="touchCal2GoCoordinateStep()">重新校准</button>
+                                <button class="btn-base touch-cal-action touch-cal-action--primary" type="button" onclick="touchCal2GoCoordinateStep()">重新校准</button>
                                 <button class="btn-base btn-glass btn-lg" type="button" onclick="closePage()">返回桌面</button>
                             </div>
                         </div>
@@ -1093,44 +1131,56 @@
             </div>
         </div>
         <!-- 性能监控页面 -->
-        <div class="detail-page glass-xl-md" id="page-monitor">
+        <div class="detail-page glass-xl-md no-dock" id="page-monitor">
             <div class="page-header">
                 <button class="btn-base btn-glass btn-inline" onclick="closePage()">← 返回</button>
                 <h2 class="page-title">性能监控</h2>
             </div>
             <div class="page-content">
                 <div class="monitor-grid">
-                    <div class="monitor-card">
+                    <div class="monitor-card monitor-card--cpu">
                         <div class="monitor-header">
                             <span class="monitor-icon">💻</span>
-                            <span class="monitor-title">CPU</span>
+                            <div class="monitor-heading">
+                                <span class="monitor-title">CPU</span>
+                                <span class="monitor-meta">最近 60 秒 · 使用率</span>
+                            </div>
                             <span class="monitor-value" id="cpuValue">45%</span>
                         </div>
-                        <canvas id="cpuChart" class="chart-canvas"></canvas>
+                        <canvas id="cpuChart" class="chart-canvas" aria-label="CPU 最近 60 秒使用率图表"></canvas>
                     </div>
-                    <div class="monitor-card">
+                    <div class="monitor-card monitor-card--memory">
                         <div class="monitor-header">
                             <span class="monitor-icon">🧠</span>
-                            <span class="monitor-title">内存</span>
+                            <div class="monitor-heading">
+                                <span class="monitor-title">内存</span>
+                                <span class="monitor-meta">最近 60 秒 · 已用 / 总量</span>
+                            </div>
                             <span class="monitor-value" id="memValue">8.2/16 GB</span>
                         </div>
-                        <canvas id="memChart" class="chart-canvas"></canvas>
+                        <canvas id="memChart" class="chart-canvas" aria-label="内存最近 60 秒使用率图表"></canvas>
                     </div>
-                    <div class="monitor-card">
+                    <div class="monitor-card monitor-card--temperature">
                         <div class="monitor-header">
                             <span class="monitor-icon">🌡️</span>
-                            <span class="monitor-title">温度</span>
-                            <span class="monitor-value" id="tempValue">62°C</span>
+                            <div class="monitor-heading">
+                                <span class="monitor-title">温度</span>
+                                <span class="monitor-meta">最近 60 秒 · CPU 温度</span>
+                            </div>
+                            <span class="monitor-value" id="tempValue">N/A</span>
                         </div>
-                        <canvas id="tempChart" class="chart-canvas"></canvas>
+                        <canvas id="tempChart" class="chart-canvas" aria-label="CPU 最近 60 秒温度图表"></canvas>
                     </div>
-                    <div class="monitor-card">
+                    <div class="monitor-card monitor-card--network">
                         <div class="monitor-header">
                             <span class="monitor-icon">🌐</span>
-                            <span class="monitor-title">网络</span>
+                            <div class="monitor-heading">
+                                <span class="monitor-title">网络</span>
+                                <span class="monitor-meta">最近 60 秒 · 实时速率</span>
+                            </div>
                             <span class="monitor-value" id="netValue">↓2.5 ↑1.2 MB/s</span>
                         </div>
-                        <canvas id="netChart" class="chart-canvas"></canvas>
+                        <canvas id="netChart" class="chart-canvas" aria-label="网络最近 60 秒上传和下载速率图表"></canvas>
                     </div>
                 </div>
             </div>
@@ -1194,15 +1244,6 @@
                                             </div>
                                         </div>
                                     </div>
-                                    <div class="settings-row" id="wifiNetworkName" style="display: none;">
-                                        <div class="settings-row-label">
-                                            <span>🌐</span>
-                                            <span>当前网络</span>
-                                        </div>
-                                        <div class="settings-row-value">
-                                            <span id="currentWifiName">未连接</span>
-                                        </div>
-                                    </div>
                                     <div class="settings-row">
                                         <div class="settings-row-label">
                                             <span>🏷️</span>
@@ -1213,7 +1254,7 @@
                                         </div>
                                     </div>
                                 </div>
-                                <div class="device-list-container" id="wifiNetworksContainer" style="display: none;">
+                                <div class="info-card device-list-container" id="wifiNetworksContainer" style="display: none;">
                                     <div class="list-stack" id="wifiList"></div>
                                 </div>
                             </section>
@@ -1230,15 +1271,6 @@
                                                 <input type="checkbox" id="bluetoothSwitchInput">
                                                 <span class="ios-switch-slider"></span>
                                             </div>
-                                        </div>
-                                    </div>
-                                    <div class="settings-row" id="bluetoothDeviceName" style="display: none;">
-                                        <div class="settings-row-label">
-                                            <span>🎧</span>
-                                            <span>当前设备</span>
-                                        </div>
-                                        <div class="settings-row-value">
-                                            <span id="currentBluetoothDevice">未连接</span>
                                         </div>
                                     </div>
                                     <div class="settings-row" id="bluetoothModeRow" style="display: none;">
@@ -1277,7 +1309,7 @@
                                         </div>
                                     </div>
                                 </div>
-                                <div class="device-list-container" id="bluetoothDevicesContainer"
+                                <div class="info-card device-list-container" id="bluetoothDevicesContainer"
                                     style="display: none;">
                                     <div class="list-stack" id="bluetoothList"></div>
                                 </div>
@@ -1288,39 +1320,29 @@
                                     <div class="settings-row">
                                         <div class="settings-row-label">
                                             <span class="icon-md">🔊</span>
-                                            <span>当前本地播放来源</span>
+                                            <span>播放来源（耳机 / 蓝牙）</span>
                                         </div>
                                         <div class="settings-row-control settings-row-control-wide">
-                                            <select id="audioLocalRouteSelect" class="select-base control-md">
-                                                <option value="hdmi">HDMI</option>
-                                                <option value="uac">UAC</option>
-                                            </select>
-                                        </div>
-                                    </div>
-                                    <div class="settings-row">
-                                        <div class="settings-row-label">
-                                            <span class="icon-md">📡</span>
-                                            <span>蓝牙输出来源</span>
-                                        </div>
-                                        <div class="settings-row-control settings-row-control-wide">
-                                            <select id="audioBluetoothRouteSelect" class="select-base control-md">
-                                                <option value="hdmi">HDMI</option>
-                                                <option value="uac">UAC</option>
+                                            <select id="audioSourceSelect" class="select-base control-md">
+                                                <option value="hdmi">HDMI 输入</option>
+                                                <option value="uac">USB UAC 输入</option>
                                             </select>
                                         </div>
                                     </div>
                                     <div class="settings-row">
                                         <div class="settings-row-label">
                                             <span class="icon-md">🎙️</span>
-                                            <span>麦克风来源</span>
+                                            <span>录音来源</span>
                                         </div>
                                         <div class="settings-row-control settings-row-control-wide">
                                             <select id="audioMicRouteSelect" class="select-base control-md">
                                                 <option value="onboard">板载麦克风</option>
                                                 <option value="headset">耳机麦克风</option>
+                                                <option value="bluetooth">蓝牙耳机麦克风</option>
                                             </select>
                                         </div>
                                     </div>
+                                    <div id="audioRouteStatus" class="audio-route-status" role="status" aria-live="polite">音频来源状态：等待设备</div>
                                     <button class="settings-row settings-row-clickable" type="button" onclick="openPage('audio-eq')">
                                         <div class="settings-row-label">
                                             <span class="icon-md">🎚️</span>
@@ -1331,15 +1353,6 @@
                                             <span class="settings-row-arrow">›</span>
                                         </div>
                                     </button>
-                                    <div class="settings-row">
-                                        <div class="settings-row-label">
-                                            <span>📝</span>
-                                            <span>说明</span>
-                                        </div>
-                                        <div class="settings-row-value settings-row-value-multiline">
-                                            本地播放决定 DAC 当前监听来源；蓝牙输出决定蓝牙发射取流来源；EQ 调音会保存到下位机并在启动时自动加载。
-                                        </div>
-                                    </div>
                                 </div>
                             </section>
                             <section class="settings-section panel-dark" id="settings-display">
@@ -1352,10 +1365,127 @@
                                         </div>
                                         <div class="settings-row-control settings-row-control-wide">
                                             <select id="displayScaleModeSelect" class="select-base control-md">
-                                                <option value="1" selected>等比缩放</option>
-                                                <option value="0">全屏拉伸</option>
+                                                <option value="0" selected>全屏拉伸</option>
+                                                <option value="1">等比缩放</option>
                                             </select>
                                         </div>
+                                    </div>
+                                </div>
+                                <div class="info-card status-led-settings-card">
+                                    <div class="status-led-settings-header">
+                                        <div>
+                                            <h4>💡 状态指示灯</h4>
+                                            <div class="text-muted">为设备运行状态选择指示灯样式</div>
+                                        </div>
+                                        <span class="status-led-settings-badge" id="statusLedConfigStatus">未读取</span>
+                                    </div>
+                                    <div class="status-led-settings-list">
+                                        <div class="status-led-setting-row">
+                                            <div class="status-led-setting-name">
+                                                <span class="status-led-preview" data-led-preview="handshake"></span>
+                                                <span>HDMI 协商</span>
+                                            </div>
+                                            <select class="select-base control-md status-led-select" data-led-state="handshake">
+                                                <option value="0">关闭</option>
+                                                <option value="1">常亮</option>
+                                                <option value="2">呼吸灯</option>
+                                                <option value="3">慢闪</option>
+                                                <option value="4">快闪</option>
+                                                <option value="5">5 秒单闪</option>
+                                                <option value="6">5 秒双闪</option>
+                                                <option value="7">三闪</option>
+                                                <option value="8">心跳</option>
+                                            </select>
+                                        </div>
+                                        <div class="status-led-setting-row">
+                                            <div class="status-led-setting-name">
+                                                <span class="status-led-preview" data-led-preview="noSignal"></span>
+                                                <span>无信号</span>
+                                            </div>
+                                            <select class="select-base control-md status-led-select" data-led-state="noSignal">
+                                                <option value="0">关闭</option>
+                                                <option value="1">常亮</option>
+                                                <option value="2">呼吸灯</option>
+                                                <option value="3">慢闪</option>
+                                                <option value="4">快闪</option>
+                                                <option value="5">5 秒单闪</option>
+                                                <option value="6">5 秒双闪</option>
+                                                <option value="7">三闪</option>
+                                                <option value="8">心跳</option>
+                                            </select>
+                                        </div>
+                                        <div class="status-led-setting-row">
+                                            <div class="status-led-setting-name">
+                                                <span class="status-led-preview" data-led-preview="fido2"></span>
+                                                <span>FIDO2 等待确认</span>
+                                            </div>
+                                            <select class="select-base control-md status-led-select" data-led-state="fido2">
+                                                <option value="0">关闭</option>
+                                                <option value="1">常亮</option>
+                                                <option value="2">呼吸灯</option>
+                                                <option value="3">慢闪</option>
+                                                <option value="4">快闪</option>
+                                                <option value="5">5 秒单闪</option>
+                                                <option value="6">5 秒双闪</option>
+                                                <option value="7">三闪</option>
+                                                <option value="8">心跳</option>
+                                            </select>
+                                        </div>
+                                        <div class="status-led-setting-row">
+                                            <div class="status-led-setting-name">
+                                                <span class="status-led-preview" data-led-preview="bluetoothSearch"></span>
+                                                <span>蓝牙搜索/配对</span>
+                                            </div>
+                                            <select class="select-base control-md status-led-select" data-led-state="bluetoothSearch">
+                                                <option value="0">关闭</option>
+                                                <option value="1">常亮</option>
+                                                <option value="2">呼吸灯</option>
+                                                <option value="3">慢闪</option>
+                                                <option value="4">快闪</option>
+                                                <option value="5">5 秒单闪</option>
+                                                <option value="6">5 秒双闪</option>
+                                                <option value="7">三闪</option>
+                                                <option value="8">心跳</option>
+                                            </select>
+                                        </div>
+                                        <div class="status-led-setting-row">
+                                            <div class="status-led-setting-name">
+                                                <span class="status-led-preview" data-led-preview="ready"></span>
+                                                <span>显示正常</span>
+                                            </div>
+                                            <select class="select-base control-md status-led-select" data-led-state="ready">
+                                                <option value="0">关闭</option>
+                                                <option value="1">常亮</option>
+                                                <option value="2">呼吸灯</option>
+                                                <option value="3">慢闪</option>
+                                                <option value="4">快闪</option>
+                                                <option value="5">5 秒单闪</option>
+                                                <option value="6">5 秒双闪</option>
+                                                <option value="7">三闪</option>
+                                                <option value="8">心跳</option>
+                                            </select>
+                                        </div>
+                                        <div class="status-led-setting-row">
+                                            <div class="status-led-setting-name">
+                                                <span class="status-led-preview" data-led-preview="error"></span>
+                                                <span>设备异常</span>
+                                            </div>
+                                            <select class="select-base control-md status-led-select" data-led-state="error">
+                                                <option value="0">关闭</option>
+                                                <option value="1">常亮</option>
+                                                <option value="2">呼吸灯</option>
+                                                <option value="3">慢闪</option>
+                                                <option value="4">快闪</option>
+                                                <option value="5">5 秒单闪</option>
+                                                <option value="6">5 秒双闪</option>
+                                                <option value="7">三闪</option>
+                                                <option value="8">心跳</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div class="status-led-settings-actions">
+                                        <button class="btn-base btn-compact btn-tonal" type="button" id="statusLedResetButton">恢复默认</button>
+                                        <button class="btn-base btn-compact btn-primary" type="button" id="statusLedSaveButton">保存指示灯设置</button>
                                     </div>
                                 </div>
                             </section>
@@ -1392,7 +1522,9 @@
                                         <span class="hint-text">点击应用启动，点击右侧按钮添加到 Dock</span>
                                     </div>
                                 </div>
-                                <div class="apps-list" id="appsList"></div>
+                                <div class="info-card device-list-container">
+                                    <div class="apps-list list-stack" id="appsList"></div>
+                                </div>
                             </section>
                             <section class="settings-section panel-dark" id="settings-update">
                                 <h3>🔄 系统更新</h3>
@@ -1402,12 +1534,12 @@
                                             <div class="update-icon">🔄</div>
                                             <div class="update-details">
                                                 <div class="update-kicker">在线更新</div>
-                                                <div class="update-version">当前版本: <span id="currentVersion">v1.0.0</span>
+                                                <div class="update-version">当前版本: <span id="currentVersion">读取中...</span>
                                                 </div>
                                                 <div class="text-muted" id="updateStatus">准备就绪</div>
                                             </div>
                                         </div>
-                                        <div class="update-security-info">
+                                        <div class="update-security-info" id="onlineUpdateSummary">
                                             <div class="security-badge">
                                                 <span class="badge-icon">🔐</span>
                                                 <span class="badge-text">安全更新已启用</span>
@@ -1418,24 +1550,35 @@
                                                 <div class="security-feature">SHA256 完整性校验</div>
                                             </div>
                                         </div>
+                                        <div class="update-progress" id="updateProgress" hidden role="status"
+                                            aria-live="polite">
+                                            <div class="update-progress-header">
+                                                <strong id="updateProgressStage">等待开始</strong>
+                                                <span id="updateProgressMode">在线更新</span>
+                                            </div>
+                                            <div class="progress-bar">
+                                                <div class="progress-fill" id="updateProgressFill"></div>
+                                            </div>
+                                            <div class="update-progress-meta">
+                                                <span class="progress-text" id="updateProgressText">0%</span>
+                                                <span id="updateProgressUnits">阶段 0/3</span>
+                                                <span id="updateProgressElapsed">耗时 00:00</span>
+                                            </div>
+                                            <div class="progress-details">
+                                                <span class="progress-details-text" id="updateProgressDetails">准备中...</span>
+                                            </div>
+                                        </div>
                                         <div class="update-buttons">
                                             <button class="btn-base btn-lg btn-primary" onclick="checkSecureUpdate()"
                                                 id="checkUpdateBtn">
                                                 <span class="btn-icon">🔍</span>
                                                 <span>检查更新</span>
                                             </button>
-                                            <button class="btn-base btn-lg btn-danger" onclick="startSecureUpdate()"
+                                            <button class="btn-base btn-lg btn-primary" onclick="startSecureDownload()"
                                                 id="updateBtn" style="display: none;">
                                                 <span class="btn-icon">⬇️</span>
-                                                <span>开始安全更新</span>
+                                                <span>开始下载更新</span>
                                             </button>
-                                        </div>
-                                        <div class="update-progress" id="updateProgress" style="display: none;">
-                                            <div class="progress-bar">
-                                                <div class="progress-fill" id="updateProgressFill"></div>
-                                            </div>
-                                            <div class="progress-text" id="updateProgressText">0%</div>
-                                            <div class="progress-details" id="updateProgressDetails">准备中...</div>
                                         </div>
                                     </div>
 
@@ -1467,14 +1610,14 @@
                                         </div>
                                         <div class="update-progress manual-update-progress" id="manualUpdateProgress" hidden
                                             role="status" aria-live="polite">
-                                            <div class="manual-update-progress-header">
+                                            <div class="update-progress-header">
                                                 <strong id="manualUpdateProgressStage">等待开始</strong>
                                                 <span id="manualUpdateProgressMode">保留用户数据</span>
                                             </div>
                                             <div class="progress-bar">
                                                 <div class="progress-fill" id="manualUpdateProgressFill"></div>
                                             </div>
-                                            <div class="manual-update-progress-meta">
+                                            <div class="update-progress-meta">
                                                 <span class="progress-text" id="manualUpdateProgressText">0%</span>
                                                 <span id="manualUpdateProgressUnits">阶段 0/16</span>
                                                 <span id="manualUpdateProgressElapsed">耗时 00:00</span>
@@ -1580,7 +1723,6 @@
                         <input id="audioEqGlobalGain" class="audio-eq-horizontal" type="range" min="-18" max="18" step="1" value="0" aria-label="EQ 总增益">
                     </div>
                     <div class="audio-eq-bands" id="audioEqBands"></div>
-                    <div class="audio-eq-note">在坐标轴内拖动 10 个控制点调整中心频率和增益；选中控制点后可手动编辑频率、增益、Q 值和滤波类型。</div>
                 </div>
             </div>
         </div>
@@ -1596,11 +1738,11 @@
                         <!-- 左侧：笔记列表 -->
                         <div class="settings-nav panel-dark" id="notes-nav">
                             <div class="notes-nav-header">
-                                <button class="btn-base btn-md btn-primary" onclick="createNewNote()">
+                                <button class="btn-base note-button note-button--primary" onclick="createNewNote()">
                                     <span>➕</span>
                                     <span>新建</span>
                                 </button>
-                                <button class="btn-base btn-md btn-success" onclick="exportAllNotes()">
+                                <button class="btn-base note-button" onclick="exportAllNotes()">
                                     <span>📤</span>
                                     <span>导出</span>
                                 </button>
@@ -1618,16 +1760,16 @@
                                         <input type="text" id="noteTitle" class="note-title-input"
                                             placeholder="无标题笔记" />
                                         <div class="note-actions">
-                                            <button class="btn-base btn-sm btn-success" onclick="toggleNotePreview()"
+                                            <button class="btn-base note-button note-button--primary" onclick="toggleNotePreview()"
                                                 id="previewToggle">
                                                 <span>👁️</span>
                                                 <span>预览</span>
                                             </button>
-                                            <button class="btn-base btn-sm btn-warning" onclick="exportCurrentNote()">
+                                            <button class="btn-base note-button" onclick="exportCurrentNote()">
                                                 <span>📤</span>
                                                 <span>导出</span>
                                             </button>
-                                            <button class="btn-base btn-sm btn-danger" onclick="deleteCurrentNote()">
+                                            <button class="btn-base note-button note-button--danger" onclick="deleteCurrentNote()">
                                                 <span>🗑️</span>
                                                 <span>删除</span>
                                             </button>
@@ -1669,12 +1811,15 @@
                 </div>
             </div>
             <div class="rk628-config-tabsbar">
-                <div class="input-tabs">
-                    <button class="input-tab-button btn-base btn-tab active" data-rk628-tab="edid"
-                        onclick="switchRK628Tab('edid')">EDID Hex</button>
-                    <button class="input-tab-button btn-base btn-tab" data-rk628-tab="dst-live" onclick="switchRK628Tab('dst-live')">屏幕输出</button>
-                    <button class="input-tab-button btn-base btn-tab" data-rk628-tab="init-seq" onclick="switchRK628Tab('init-seq')">初始化序列</button>
-                    <button class="input-tab-button btn-base btn-tab" data-rk628-tab="edid-tuning" onclick="switchRK628Tab('edid-tuning')">调试参数</button>
+                <div class="input-tabs ui-tabs" role="tablist" aria-label="显示配置视图">
+                    <button class="input-tab-button btn-base btn-tab ui-tab active" data-rk628-tab="edid"
+                        role="tab" aria-selected="true" onclick="switchRK628Tab('edid', this)">EDID Hex</button>
+                    <button class="input-tab-button btn-base btn-tab ui-tab" data-rk628-tab="dst-live" role="tab"
+                        aria-selected="false" onclick="switchRK628Tab('dst-live', this)">屏幕输出</button>
+                    <button class="input-tab-button btn-base btn-tab ui-tab" data-rk628-tab="init-seq" role="tab"
+                        aria-selected="false" onclick="switchRK628Tab('init-seq', this)">初始化序列</button>
+                    <button class="input-tab-button btn-base btn-tab ui-tab" data-rk628-tab="edid-tuning" role="tab"
+                        aria-selected="false" onclick="switchRK628Tab('edid-tuning', this)">调试参数</button>
                 </div>
             </div>
             <!-- 屏幕输出（调试/实时覆盖 + 可选写Flash） -->
@@ -1682,7 +1827,7 @@
                 <div class="page-content">
                     <div class="display-config-section">
                         <!-- 可视化时序图（与屏幕输出一致，但字段独立） -->
-                        <div class="timing-diagram panel-dark">
+                        <div class="timing-diagram panel-dark ui-panel">
                             <div class="timing-section">
                                 <div class="timing-label">水平时序 (H)</div>
                                 <div class="timing-visual horizontal-timing">
@@ -1751,7 +1896,7 @@
                         </div>
 
                         <!-- 右侧参数列：像素时钟、Lane Rate、Polarity -->
-                        <div class="timing-row panel-dark">
+                        <div class="timing-row panel-dark ui-panel">
                             <div class="timing-section clock-section">
                                 <div class="timing-label"><span>像素时钟</span></div>
                                 <div class="clock-inline-group">
@@ -1760,7 +1905,7 @@
                                 </div>
                             </div>
                             <div class="timing-section fps-section">
-                                <div class="timing-label">Lane Rate</div>
+                                <div class="timing-label">通道速率</div>
                                 <div class="fps-input-group">
                                     <input type="number" id="rt-lane-rate" placeholder="1080" value="0" min="0" max="1500">
                                     <span class="fps-unit">Mbps</span>
@@ -1768,7 +1913,7 @@
                                 <div class="field-hint">0 表示自动；固定值范围为 80 到 1500 Mbps</div>
                             </div>
                             <div class="timing-section flags-section">
-                                <div class="timing-label">Polarity</div>
+                                <div class="timing-label">同步极性</div>
                                 <div class="flags-group">
                                     <label class="flag-checkbox">
                                         <input type="checkbox" id="rt-hsync-positive">
@@ -1784,7 +1929,7 @@
                         </div>
                     </div>
 
-                    <div class="tab-actions">
+                    <div class="tab-actions ui-actions">
                         <button class="btn-base btn-inline btn-tonal" onclick="rk628RtReload()">
                             <span class="icon-sm">🔄</span>
                             <span>从下位机读取</span>
@@ -1805,7 +1950,7 @@
             <div class="input-tab-content" id="tab-init-seq">
                 <div class="page-content">
                     <div class="display-config-section">
-                        <div class="panel-dark rk628-initseq-panel">
+                        <div class="panel-dark ui-panel rk628-initseq-panel">
                             <div class="rk628-initseq-head">
                                 <div class="rk628-initseq-title">初始化序列</div>
                                 <div class="rk628-initseq-subtitle">每行格式：DT DELAY LEN PAYLOAD...（均为16进制字节）</div>
@@ -1813,89 +1958,132 @@
                             <textarea id="rk628-init-seq-text" class="rk628-initseq-textarea" spellcheck="false" placeholder="（空）打开本页时会自动从下位机读取；点击‘应用’后将保存到本地缓存"></textarea>
                         </div>
 
-                        <div class="panel-dark rk628-initseq-side">
-                            <div class="rk628-initseq-actions">
-                                <button class="btn-base btn-inline btn-tonal" onclick="rk628InitSeqReload()">
-                                    <span>🔄</span>
-                                    <span>从下位机读取</span>
-                                </button>
-
-                                <div class="rk628-initseq-modeflags">
-                                    <div class="rk628-initseq-modeflags-title" style="font-family: var(--font-family-mono);">/* .mode_flags */</div>
-                                    <div class="rk628-initseq-modeflags-grid">
-                                        <label class="flag-checkbox"><input type="checkbox" id="initseq-flag-video" checked><span>VIDEO</span></label>
-                                        <label class="flag-checkbox"><input type="checkbox" id="initseq-flag-burst" checked><span>VIDEO_BURST</span></label>
-                                        <label class="flag-checkbox"><input type="checkbox" id="initseq-flag-syncpulse"><span>VIDEO_SYNC_PULSE</span></label>
-                                        <label class="flag-checkbox"><input type="checkbox" id="initseq-flag-hfp"><span>VIDEO_HFP</span></label>
-                                        <label class="flag-checkbox"><input type="checkbox" id="initseq-flag-hbp"><span>VIDEO_HBP</span></label>
-                                        <label class="flag-checkbox"><input type="checkbox" id="initseq-flag-eot" checked><span>EOT_PACKET</span></label>
-                                        <label class="flag-checkbox"><input type="checkbox" id="initseq-flag-noncont"><span>CLOCK_NON_CONTINUOUS</span></label>
-                                        <label class="flag-checkbox"><input type="checkbox" id="initseq-flag-lpm" checked><span>LPM</span></label>
-                                    </div>
-                                    <div class="rk628-initseq-modeflags-value" style="font-family: var(--font-family-mono);">mode_flags: <span id="initseq-modeflags-value">0x00000000</span></div>
+                        <aside class="panel-dark ui-panel rk628-edid-control-panel rk628-initseq-side">
+                            <div class="rk628-edid-control-head">
+                                <div>
+                                    <div class="rk628-edid-title">序列控制</div>
+                                    <div class="rk628-edid-control-subtitle">MIPI 模式与设备操作</div>
                                 </div>
-
-                                <button class="btn-base btn-inline btn-tonal is-primary" onclick="rk628InitSeqApply()">
-                                    <span>✅</span>
-                                    <span>应用（不写Flash）</span>
-                                </button>
-
-                                <button class="btn-base btn-inline btn-tonal is-warning" onclick="rk628InitSeqWriteFlash()">
-                                    <span>💾</span>
-                                    <span>写入Flash并硬重启</span>
+                                <button class="btn-base btn-compact btn-tonal" onclick="rk628InitSeqReload()">
+                                    <span>🔄</span>
+                                    <span>读取</span>
                                 </button>
                             </div>
-                        </div>
+
+                            <div class="rk628-edid-sidebar rk628-initseq-sidebar">
+                                <section class="rk628-edid-sidebar-section rk628-initseq-modeflags">
+                                    <div class="rk628-edid-sidebar-title rk628-initseq-modeflags-title">MIPI 模式标志</div>
+                                    <div class="rk628-initseq-modeflags-body">
+                                        <div class="rk628-initseq-modeflags-grid">
+                                            <label class="flag-checkbox"><input type="checkbox" id="initseq-flag-video" checked><span>VIDEO</span></label>
+                                            <label class="flag-checkbox"><input type="checkbox" id="initseq-flag-burst" checked><span>VIDEO_BURST</span></label>
+                                            <label class="flag-checkbox"><input type="checkbox" id="initseq-flag-syncpulse"><span>VIDEO_SYNC_PULSE</span></label>
+                                            <label class="flag-checkbox"><input type="checkbox" id="initseq-flag-hfp"><span>VIDEO_HFP</span></label>
+                                            <label class="flag-checkbox"><input type="checkbox" id="initseq-flag-hbp"><span>VIDEO_HBP</span></label>
+                                            <label class="flag-checkbox"><input type="checkbox" id="initseq-flag-eot" checked><span>EOT_PACKET</span></label>
+                                            <label class="flag-checkbox"><input type="checkbox" id="initseq-flag-noncont"><span>CLOCK_NON_CONTINUOUS</span></label>
+                                            <label class="flag-checkbox"><input type="checkbox" id="initseq-flag-lpm" checked><span>LPM</span></label>
+                                        </div>
+                                        <div class="rk628-initseq-modeflags-value" style="font-family: var(--font-family-mono);">mode_flags: <span id="initseq-modeflags-value">0x00000000</span></div>
+                                    </div>
+                                </section>
+
+                                <section class="rk628-edid-sidebar-section rk628-edid-device-section">
+                                    <div class="rk628-edid-device-actions">
+                                        <button class="btn-base btn-inline btn-tonal is-primary" onclick="rk628InitSeqApply()">
+                                            <span>✅</span>
+                                            <span>应用（不写Flash）</span>
+                                        </button>
+                                        <button class="btn-base btn-inline btn-tonal is-warning" onclick="rk628InitSeqWriteFlash()">
+                                            <span>💾</span>
+                                            <span>写入Flash并硬重启</span>
+                                        </button>
+                                    </div>
+                                </section>
+                            </div>
+                        </aside>
                     </div>
                 </div>
             </div>
             <!-- EDID配置 -->
             <div class="input-tab-content active" id="tab-edid">
                 <div class="page-content rk628-edid-page">
-                    <div class="rk628-edid-workspace panel-dark">
-                        <div class="rk628-edid-toolbar">
-                            <div class="rk628-edid-heading">
-                                <div class="rk628-edid-title">EDID 原始数据</div>
-                                <div class="rk628-edid-meta">256 bytes · 16 bytes per line</div>
-                            </div>
-                            <div class="rk628-edid-file-actions">
-                                <input type="file" id="edid-file-input" accept=".bin,.edid" style="display: none;"
-                                    onchange="loadEdidFromFile(this)">
-                                <button class="btn-base btn-compact btn-tonal"
-                                    onclick="document.getElementById('edid-file-input').click()">打开</button>
-                                <button class="btn-base btn-compact btn-tonal" onclick="downloadEdidFile()">导出</button>
-                                <button class="btn-base btn-compact btn-tonal" onclick="copyEdidHex()">复制</button>
-                                <button class="btn-base btn-compact btn-tonal" onclick="pasteEdidHex()">粘贴</button>
-                                <button class="btn-base btn-compact btn-tonal is-warning" onclick="clearEdidHex()">清空</button>
-                            </div>
-                        </div>
-
-                        <div class="rk628-edid-column-header" aria-hidden="true">
-                            <span>00</span><span>01</span><span>02</span><span>03</span>
-                            <span>04</span><span>05</span><span>06</span><span>07</span>
-                            <span>08</span><span>09</span><span>0A</span><span>0B</span>
-                            <span>0C</span><span>0D</span><span>0E</span><span>0F</span>
-                        </div>
-                        <textarea id="edid-hex" class="rk628-edid-textarea" spellcheck="false"
-                            autocomplete="off" autocapitalize="off" oninput="updateEdidCharCount()"
-                            aria-label="EDID 十六进制数据"></textarea>
-
-                        <div class="rk628-edid-footer">
-                            <div class="rk628-edid-validation">
-                                <div class="edid-status" id="edid-status">
-                                    <span class="status-dot"></span>
-                                    <span>未加载</span>
+                    <div class="rk628-edid-layout">
+                        <div class="panel-dark ui-panel rk628-edid-editor-panel">
+                            <div class="rk628-edid-toolbar">
+                                <div class="rk628-edid-heading">
+                                    <div class="rk628-edid-title">EDID 原始数据</div>
+                                    <div class="rk628-edid-meta">256 bytes · 16 bytes per line</div>
                                 </div>
-                                <div class="edid-counter"><span id="edid-byte-count">0</span> / 256 bytes</div>
-                                <div class="rk628-edid-check" id="edid-base-check">Base --</div>
-                                <div class="rk628-edid-check" id="edid-extension-check">Extension --</div>
                             </div>
-                            <div class="rk628-edid-device-actions">
-                                <button class="btn-base btn-inline btn-tonal" onclick="loadRK628Config()">从设备读取</button>
-                                <button class="btn-base btn-inline btn-tonal is-primary" id="edid-save-button"
-                                    onclick="applyEdidConfig()" disabled>写入并重载 EDID</button>
+
+                            <div class="rk628-edid-editor-pane">
+                                <div class="rk628-edid-column-header" aria-hidden="true">
+                                    <span class="rk628-edid-offset-label"></span>
+                                    <div class="rk628-edid-byte-labels">
+                                        <span>00</span><span>01</span><span>02</span><span>03</span>
+                                        <span>04</span><span>05</span><span>06</span><span>07</span>
+                                        <span>08</span><span>09</span><span>0A</span><span>0B</span>
+                                        <span>0C</span><span>0D</span><span>0E</span><span>0F</span>
+                                    </div>
+                                    <span class="rk628-edid-ascii-label">ASCII</span>
+                                </div>
+                                <div class="rk628-edid-editor-body">
+                                    <pre id="edid-offsets" class="rk628-edid-offsets" aria-hidden="true"></pre>
+                                    <textarea id="edid-hex" class="rk628-edid-textarea" spellcheck="false"
+                                        autocomplete="off" autocapitalize="off" oninput="updateEdidCharCount()"
+                                        aria-label="EDID 十六进制数据"></textarea>
+                                    <pre id="edid-ascii" class="rk628-edid-ascii" aria-hidden="true"></pre>
+                                </div>
                             </div>
                         </div>
+
+                        <aside class="panel-dark ui-panel rk628-edid-control-panel">
+                            <div class="rk628-edid-control-head">
+                                <div class="rk628-edid-title">EDID 控制</div>
+                                <div class="rk628-edid-control-subtitle">状态、文件与设备操作</div>
+                            </div>
+
+                            <div class="rk628-edid-sidebar">
+                                <section class="rk628-edid-sidebar-section">
+                                    <div class="rk628-edid-sidebar-title">数据状态</div>
+                                    <div class="rk628-edid-validation-summary">
+                                        <div class="edid-status" id="edid-status">
+                                            <span class="status-dot"></span>
+                                            <span>未加载</span>
+                                        </div>
+                                        <div class="edid-counter"><span id="edid-byte-count">0</span> / 256 bytes</div>
+                                    </div>
+                                    <div class="rk628-edid-validation-checks">
+                                        <div class="rk628-edid-check" id="edid-base-check">Base --</div>
+                                        <div class="rk628-edid-check" id="edid-extension-check">Extension --</div>
+                                    </div>
+                                </section>
+
+                                <section class="rk628-edid-sidebar-section">
+                                    <div class="rk628-edid-sidebar-title">文件操作</div>
+                                    <div class="rk628-edid-file-actions">
+                                        <input type="file" id="edid-file-input" accept=".bin,.edid" style="display: none;"
+                                            onchange="loadEdidFromFile(this)">
+                                        <button class="btn-base btn-compact btn-tonal"
+                                            onclick="document.getElementById('edid-file-input').click()"><span class="icon-sm">📂</span><span>打开</span></button>
+                                        <button class="btn-base btn-compact btn-tonal" onclick="downloadEdidFile()"><span class="icon-sm">💾</span><span>导出</span></button>
+                                        <button class="btn-base btn-compact btn-tonal" onclick="copyEdidHex()"><span class="icon-sm">📋</span><span>复制</span></button>
+                                        <button class="btn-base btn-compact btn-tonal" onclick="pasteEdidHex()"><span class="icon-sm">📥</span><span>粘贴</span></button>
+                                        <button class="btn-base btn-compact btn-tonal is-warning" onclick="clearEdidHex()"><span class="icon-sm">🗑️</span><span>清空</span></button>
+                                    </div>
+                                </section>
+
+                                <section class="rk628-edid-sidebar-section rk628-edid-device-section">
+                                    <div class="rk628-edid-sidebar-title">设备操作</div>
+                                    <div class="rk628-edid-device-actions">
+                                        <button class="btn-base btn-inline btn-tonal" onclick="loadRK628Config()"><span class="icon-sm">🔄</span><span>从设备读取</span></button>
+                                        <button class="btn-base btn-inline btn-tonal is-primary" id="edid-save-button"
+                                            onclick="applyEdidConfig()" disabled><span class="icon-sm">✅</span><span>写入并重载 EDID</span></button>
+                                    </div>
+                                </section>
+                            </div>
+                        </aside>
                     </div>
                 </div>
             </div>
@@ -1905,103 +2093,114 @@
                 <div class="page-content rk628-debug-page">
                     <div class="rk628-quick-subcontent active" id="rk628-quick-view-tuning">
                         <div class="display-config-section rk628-debug-layout">
-                            <div class="panel-dark rk628-debug-panel">
+                            <div class="panel-dark ui-panel rk628-debug-panel">
                                 <div class="rk628-debug-head">
                                     <div class="rk628-debug-title">处理参数</div>
                                     <div class="rk628-debug-subtitle">调整捕获、缩放与输出同步行为</div>
                                 </div>
 
-                                <div class="rk628-debug-group">
-                                    <div class="rk628-debug-group-title">捕获方式</div>
-                                    <div class="rk628-debug-options rk628-debug-options-three">
-                                        <label class="flag-checkbox"><input type="checkbox" id="rk628-pp-cap-psync"><span>CAP_PSYNC</span></label>
-                                        <label class="flag-checkbox"><input type="checkbox" id="rk628-pp-cap-async" checked><span>CAP_ASYNC</span></label>
-                                        <label class="flag-checkbox"><input type="checkbox" id="rk628-pp-progress" checked><span>PROGRESS</span></label>
+                                <div class="rk628-debug-parameter-grid">
+                                    <div class="rk628-debug-parameter-row">
+                                        <div class="rk628-debug-parameter-section">
+                                            <div class="rk628-debug-group-title">捕获方式</div>
+                                            <div class="rk628-debug-options rk628-debug-options-three">
+                                                <label class="flag-checkbox"><input type="checkbox" id="rk628-pp-cap-psync"><span>CAP_PSYNC</span></label>
+                                                <label class="flag-checkbox"><input type="checkbox" id="rk628-pp-cap-async" checked><span>CAP_ASYNC</span></label>
+                                                <label class="flag-checkbox"><input type="checkbox" id="rk628-pp-progress" checked><span>PROGRESS</span></label>
+                                            </div>
+                                        </div>
+
+                                        <div class="rk628-debug-parameter-section">
+                                            <div class="rk628-debug-group-title">画面处理</div>
+                                            <div class="rk628-debug-options rk628-debug-options-three">
+                                                <label class="flag-checkbox"><input type="checkbox" id="rk628-pp-keep-aspect"><span>等比缩放</span></label>
+                                                <label class="flag-checkbox"><input type="checkbox" id="rk628-pp-dst-clock-follow"><span>输出时钟跟随</span></label>
+                                                <label class="flag-checkbox"><input type="checkbox" id="rk628-pp-power-cycle"><span>掉电重置</span></label>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div class="rk628-debug-parameter-row">
+                                        <div class="rk628-debug-parameter-section">
+                                            <div class="rk628-debug-group-title">同步极性</div>
+                                            <div class="rk628-debug-options rk628-debug-options-two">
+                                                <label class="flag-checkbox"><input type="checkbox" id="rk628-pp-force-hpol" checked><span>强制水平极性</span></label>
+                                                <label class="flag-checkbox"><input type="checkbox" id="rk628-pp-hpol" checked><span>水平高有效</span></label>
+                                                <label class="flag-checkbox"><input type="checkbox" id="rk628-pp-force-vpol" checked><span>强制垂直极性</span></label>
+                                                <label class="flag-checkbox"><input type="checkbox" id="rk628-pp-vpol" checked><span>垂直高有效</span></label>
+                                            </div>
+                                        </div>
+
+                                        <div class="rk628-debug-parameter-section rk628-debug-frame-group">
+                                            <div class="rk628-debug-section-heading">
+                                                <div class="rk628-debug-group-title">Frame 控制</div>
+                                                <div class="rk628-debug-section-note">输出帧起点</div>
+                                            </div>
+
+                                            <div class="rk628-debug-frame-modes">
+                                                <label class="flag-checkbox"><input type="radio" name="rk628PpDspFrameMode" id="rk628-pp-dsp-fixed" checked><span>FRAME 固定</span></label>
+                                                <label class="flag-checkbox"><input type="radio" name="rk628PpDspFrameMode" id="rk628-pp-dsp-auto"><span>FRAME 自动</span></label>
+                                            </div>
+
+                                            <div class="rk628-debug-frame-fields">
+                                                <label class="config-field">
+                                                    <span>HST</span>
+                                                    <input type="number" id="rk628-pp-dsp-hst" value="0" min="0" step="1">
+                                                </label>
+                                                <label class="config-field">
+                                                    <span>VST</span>
+                                                    <input type="number" id="rk628-pp-dsp-vst" value="4" min="0" step="1">
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div class="rk628-debug-parameter-row">
+                                        <div class="rk628-debug-parameter-section">
+                                            <div class="rk628-debug-group-title">快速预设</div>
+                                            <div class="rk628-debug-presets">
+                                                <button class="btn-base btn-inline btn-tonal" onclick="rk628QuickPpPreset('psyncOnly')">仅 PSYNC</button>
+                                                <button class="btn-base btn-inline btn-tonal" onclick="rk628QuickPpPreset('autoFrame')">Frame 自动</button>
+                                                <button class="btn-base btn-inline btn-tonal" onclick="rk628QuickPpPreset('noForcePol')">释放极性</button>
+                                            </div>
+                                        </div>
+
+                                        <div class="rk628-debug-parameter-section rk628-power-section" id="rk628-power-section">
+                                            <div class="rk628-power-heading">
+                                                <div class="rk628-debug-group-title">屏幕供电</div>
+                                                <span class="rk628-power-status" id="rk628-power-status">读取中</span>
+                                            </div>
+                                            <div class="rk628-power-modes">
+                                                <label class="flag-checkbox rk628-power-mode-option">
+                                                    <input type="radio" name="rk628PowerMode" id="rk628-power-screen" checked onchange="rk628QuickPowerModeChanged()">
+                                                    <span>屏幕控制</span>
+                                                </label>
+                                                <label class="flag-checkbox rk628-power-mode-option">
+                                                    <input type="radio" name="rk628PowerMode" id="rk628-power-mcu" onchange="rk628QuickPowerModeChanged()">
+                                                    <span>MCU 控制</span>
+                                                </label>
+                                            </div>
+                                        </div>
                                     </div>
                                 </div>
+                            </div>
 
-                                <div class="rk628-debug-group">
-                                    <div class="rk628-debug-group-title">画面处理</div>
-                                    <div class="rk628-debug-options rk628-debug-options-three">
-                                        <label class="flag-checkbox"><input type="checkbox" id="rk628-pp-keep-aspect"><span>等比缩放</span></label>
-                                        <label class="flag-checkbox"><input type="checkbox" id="rk628-pp-dst-clock-follow"><span>输出时钟跟随</span></label>
-                                        <label class="flag-checkbox"><input type="checkbox" id="rk628-pp-power-cycle"><span>掉电重置</span></label>
-                                    </div>
-                                </div>
-
-                                <div class="rk628-debug-group">
-                                    <div class="rk628-debug-group-title">同步极性</div>
-                                    <div class="rk628-debug-options rk628-debug-options-two">
-                                        <label class="flag-checkbox"><input type="checkbox" id="rk628-pp-force-hpol" checked><span>强制水平极性</span></label>
-                                        <label class="flag-checkbox"><input type="checkbox" id="rk628-pp-hpol" checked><span>水平高有效</span></label>
-                                        <label class="flag-checkbox"><input type="checkbox" id="rk628-pp-force-vpol" checked><span>强制垂直极性</span></label>
-                                        <label class="flag-checkbox"><input type="checkbox" id="rk628-pp-vpol" checked><span>垂直高有效</span></label>
-                                    </div>
-                                </div>
-
+                            <div class="panel-dark ui-panel rk628-debug-side rk628-debug-output-panel">
                                 <div class="rk628-debug-output">
                                     <div class="rk628-debug-output-head">
-                                        <div class="rk628-debug-group-title">调试输出</div>
+                                        <div class="rk628-debug-title">调试输出</div>
                                         <span>读取结果 / 寄存器快照</span>
                                     </div>
                                     <textarea class="textarea-base" id="rk628-pp-debug" rows="3" readonly placeholder="暂无输出"></textarea>
                                 </div>
                             </div>
-
-                            <div class="panel-dark rk628-debug-side">
-                                <div class="rk628-debug-head">
-                                    <div class="rk628-debug-title">Frame 控制</div>
-                                    <div class="rk628-debug-subtitle">设置输出帧起点与常用参数组合</div>
-                                </div>
-
-                                <div class="rk628-debug-frame-modes">
-                                    <label class="flag-checkbox"><input type="radio" name="rk628PpDspFrameMode" id="rk628-pp-dsp-fixed" checked><span>FRAME 固定</span></label>
-                                    <label class="flag-checkbox"><input type="radio" name="rk628PpDspFrameMode" id="rk628-pp-dsp-auto"><span>FRAME 自动</span></label>
-                                </div>
-
-                                <div class="rk628-debug-frame-fields">
-                                    <label class="config-field">
-                                        <span>HST</span>
-                                        <input type="number" id="rk628-pp-dsp-hst" value="0" min="0" step="1">
-                                    </label>
-                                    <label class="config-field">
-                                        <span>VST</span>
-                                        <input type="number" id="rk628-pp-dsp-vst" value="4" min="0" step="1">
-                                    </label>
-                                </div>
-
-                                <div class="rk628-debug-divider"></div>
-                                <div class="rk628-debug-group-title">快速预设</div>
-                                <div class="rk628-debug-presets">
-                                    <button class="btn-base btn-inline btn-tonal" onclick="rk628QuickPpPreset('psyncOnly')">仅 PSYNC</button>
-                                    <button class="btn-base btn-inline btn-tonal" onclick="rk628QuickPpPreset('autoFrame')">Frame 自动</button>
-                                    <button class="btn-base btn-inline btn-tonal" onclick="rk628QuickPpPreset('noForcePol')">释放极性</button>
-                                </div>
-
-                                <div class="rk628-power-section" id="rk628-power-section">
-                                    <div class="rk628-power-heading">
-                                        <div class="rk628-debug-title">屏幕供电</div>
-                                        <span class="rk628-power-status" id="rk628-power-status">读取中</span>
-                                    </div>
-                                    <div class="rk628-power-modes">
-                                        <label class="flag-checkbox rk628-power-mode-option">
-                                            <input type="radio" name="rk628PowerMode" id="rk628-power-screen" checked onchange="rk628QuickPowerModeChanged()">
-                                            <span>屏幕控制</span>
-                                        </label>
-                                        <label class="flag-checkbox rk628-power-mode-option">
-                                            <input type="radio" name="rk628PowerMode" id="rk628-power-mcu" onchange="rk628QuickPowerModeChanged()">
-                                            <span>MCU 控制</span>
-                                        </label>
-                                    </div>
-                                </div>
-                            </div>
                         </div>
 
-                        <div class="tab-actions rk628-debug-actions">
-                            <button class="btn-base btn-inline btn-tonal" onclick="rk628QuickPpLoad()">从下位机读取</button>
-                            <button class="btn-base btn-inline btn-tonal" onclick="rk628QuickPpDumpRegs()">读取寄存器快照</button>
-                            <button class="btn-base btn-inline btn-tonal is-primary" onclick="rk628QuickPpApply()">应用当前参数</button>
-                            <button class="btn-base btn-inline btn-tonal is-warning" onclick="rk628QuickPpBaseline()">恢复默认参数</button>
+                        <div class="tab-actions ui-actions rk628-debug-actions">
+                            <button class="btn-base btn-inline btn-tonal" onclick="rk628QuickPpLoad()"><span class="icon-sm">🔄</span><span>从下位机读取</span></button>
+                            <button class="btn-base btn-inline btn-tonal" onclick="rk628QuickPpDumpRegs()"><span class="icon-sm">📋</span><span>读取寄存器快照</span></button>
+                            <button class="btn-base btn-inline btn-tonal is-primary" onclick="rk628QuickPpApply()"><span class="icon-sm">✅</span><span>应用当前参数</span></button>
+                            <button class="btn-base btn-inline btn-tonal is-warning" onclick="rk628QuickPpBaseline()"><span class="icon-sm">↩️</span><span>恢复默认参数</span></button>
                         </div>
                     </div>
                 </div>

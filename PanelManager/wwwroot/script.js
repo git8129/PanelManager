@@ -52,6 +52,7 @@ function initWebSocket() {
             updateMediaInfo();
             // 连接后主动刷新天气
             refreshWeather(false);
+            setTimeout(refreshCurrentFirmwareVersion, 300);
         };
         ws.onmessage = (event) => {
             try {
@@ -68,6 +69,12 @@ function initWebSocket() {
         ws.onclose = () => {
             console.log('[WebSocket] 连接已关闭');
             wsConnected = false;
+            resetWifiConnectionAfterTransportLoss();
+            const pending = Array.from(messageCallbacks.entries());
+            messageCallbacks.clear();
+            pending.forEach(([id, callback]) => {
+                try { callback({ code: 100, msg: 'WebSocket 已断开', reqId: id }); } catch { }
+            });
 
             // 使用指数退避策略重连
             wsReconnectAttempts++;
@@ -195,6 +202,26 @@ function isDeviceTransportError(response) {
         response.code === 8;
 }
 
+function isWifiOwnerFault(response) {
+    return !!response && (response.code === 6 ||
+        /radio reset required|owner unresponsive/i.test(String(response.msg || '')));
+}
+
+function showWifiOwnerFault(response) {
+    const input = document.getElementById('wifiSwitchInput');
+    const container = document.getElementById('wifiNetworksContainer');
+    if (input) input.checked = false;
+    if (container) container.style.display = 'none';
+    stopWifiAutoScan();
+    wifiStatus.mode = 0;
+    wifiStatus.on = false;
+    wifiStatus.connected = false;
+    wifiStatus.connecting = false;
+    wifiStatus.scanning = false;
+    updateWifiStatusBar();
+    showToast(`WiFi 开启失败: ${formatDeviceCommandError(response, 'WiFi 控制器需要恢复')}`);
+}
+
 // 处理事件消息
 function handleEvent(message) {
     const moduleNames = ['system', 'serial', 'bluetooth', 'wifi', 'network', 'hid', 'shortcut', 'app', 'panel', 'update', 'rk628Debug', 'audio'];
@@ -242,13 +269,16 @@ function handleEvent(message) {
             if (message.data?.serial?.open) {
                 const wasConnected = serialConnected;
                 serialConnected = true;
-                updateSerialStatusBar(true, message.data.serial.port);
+                updateSerialStatusBar(true, message.data.serial.port,
+                    message.data.serial.usbId);
                 startSerialPolling();
 
                 // 串口在线时刷新设备侧状态
                 if (!wasConnected) {
                     initWifiStatus();
                     initBluetoothStatus();
+                    audioRouteSyncFromDevice();
+                    refreshCurrentFirmwareVersion();
                 }
 
                 // If settings-bluetooth is currently active, keep BT discoverable.
@@ -286,12 +316,17 @@ function handleEvent(message) {
         case 'serial:connected':
             showToast(`串口已连接: ${message.data?.port}`);
             serialConnected = true;
-            updateSerialStatusBar(true, message.data?.port);
+            bluetoothStatusRetryCount = 0;
+            updateSerialStatusBar(true, message.data?.port,
+                message.data?.usbId ?? message.data?.auth?.usbId);
             promptSwitchToDeviceScreen(message.data?.port);
 
             // 串口连接成功后，主动刷新 WiFi/蓝牙状态，避免上位机重启后 UI 显示默认关闭
             initWifiStatus();
             initBluetoothStatus();
+            audioRouteSyncFromDevice();
+            refreshCurrentFirmwareVersion();
+            refreshOnlineUpdateViewAfterReconnect();
 
             if (isBluetoothSettingsActive()) {
                 sendMessage('bluetooth', 'setVisibility', { enable: 1 }, () => { });
@@ -300,6 +335,20 @@ function handleEvent(message) {
         case 'serial:disconnected':
             //showToast('串口已断开');
             serialConnected = false;
+            resetWifiConnectionAfterTransportLoss();
+            audioRouteApplyState.routeQueued = false;
+            audioRouteApplyState.micQueued = false;
+            audioRouteSetStatus('下位机已断开', 'error');
+            const pending = Array.from(messageCallbacks.entries());
+            messageCallbacks.clear();
+            pending.forEach(([id, callback]) => {
+                try { callback({ code: 100, msg: '串口已断开', reqId: id }); } catch { }
+            });
+            bluetoothStatusRetryCount = 0;
+            if (bluetoothStatusRetryTimer) {
+                clearTimeout(bluetoothStatusRetryTimer);
+                bluetoothStatusRetryTimer = null;
+            }
             updateSerialStatusBar(false);
             resetDeviceScreenSwitchPrompt();
             restoreFromDeviceScreenAfterSerialDisconnect();
@@ -307,8 +356,9 @@ function handleEvent(message) {
             break;
         case 'serial:opened':
             // 串口已打开但设备尚未认证，等待下位机主动 challenge 后再进入 connected。
-            serialConnected = false;
-            updateSerialStatusBar(false);
+            if (!serialConnected) {
+                updateSerialStatusBar(false);
+            }
             break;
         case 'serial:closed':
             // 兼容旧事件
@@ -316,6 +366,15 @@ function handleEvent(message) {
                 showToast('串口已关闭');
                 updateSerialStatusBar(false);
                 serialConnected = false;
+                resetWifiConnectionAfterTransportLoss();
+                audioRouteApplyState.routeQueued = false;
+                audioRouteApplyState.micQueued = false;
+                audioRouteSetStatus('下位机已关闭', 'error');
+                const closedPending = Array.from(messageCallbacks.entries());
+                messageCallbacks.clear();
+                closedPending.forEach(([id, callback]) => {
+                    try { callback({ code: 100, msg: '串口已关闭', reqId: id }); } catch { }
+                });
                 restoreFromDeviceScreenAfterSerialDisconnect();
             }
 
@@ -369,10 +428,6 @@ function handleEvent(message) {
         case 'bluetooth:initialized':
             console.log('[Bluetooth] 已初始化:', message.data);
             showToast('蓝牙已初始化');
-            if (message.data?.localName) {
-                bluetoothStatus.localName = String(message.data.localName).trim();
-                updateBluetoothLocalName();
-            }
             // 初始化完成后获取蓝牙状态
             initBluetoothStatus();
             break;
@@ -386,7 +441,7 @@ function handleEvent(message) {
                     class: message.data.class,
                     transport: message.data.transport || 'edr',
                     rssi: message.data.rssi,
-                    paired: false,
+                    paired: message.data.paired === true,
                     lastSeenMs: Date.now(),
                     scanSeq: bluetoothScanSeq
                 };
@@ -399,6 +454,7 @@ function handleEvent(message) {
                     // Update latest fields (RSSI/name can change)
                     bluetoothDevices[existsIndex] = { ...bluetoothDevices[existsIndex], ...device };
                 }
+                updateBluetoothStatusBar();
                 scheduleRenderBluetoothList();
             }
             break;
@@ -416,6 +472,11 @@ function handleEvent(message) {
                 bluetoothDevices = (bluetoothDevices || []).filter(d => !d?.lastSeenMs || (now - d.lastSeenMs) <= maxAge);
             }
             scheduleRenderBluetoothList();
+            if (pendingBtConnect?.waitingForScanStop) {
+                const { addr, name } = pendingBtConnect;
+                pendingBtConnect.waitingForScanStop = false;
+                setTimeout(() => performBluetoothConnect(addr, name), 250);
+            }
             break;
         case 'bluetooth:connected':
             // 设备已连接
@@ -425,56 +486,70 @@ function handleEvent(message) {
                 bluetoothStatus.connected = true;
                 bluetoothStatus.connectedDevice = {
                     addr: message.data.addr,
-                    name: resolveBtName(message.data.addr, message.data.name || pendingBtConnect?.name),
+                    name: resolveFirstBtName(message.data.addr, message.data.name, pendingBtConnect?.name),
                     profiles: message.data.profiles
                 };
                 connectedDevice = bluetoothStatus.connectedDevice;
-                // 更新状态栏
-                document.getElementById('btStatus').textContent = bluetoothStatus.connectedDevice.name || '已连接';
-                // 更新当前连接的设备名称
+                updateBluetoothStatusBar();
                 updateCurrentBluetoothDevice();
                 // 更新设备列表
                 scheduleRenderBluetoothList();
-                showToast(`已连接到 ${message.data.name}`);
+                showToast(`已连接到 ${resolveConnectedBtName(bluetoothStatus.connectedDevice) || '蓝牙设备'}`);
                 pendingBtConnect = null;
             }
             break;
         case 'bluetooth:paired':
             if (message.data?.addr) {
                 const addr = message.data.addr;
-                const name = resolveBtName(addr, message.data.name || pendingBtConnect?.name || addr);
-                showToast(`配对成功：${name}`);
+                const name = resolveFirstBtName(addr, message.data.name, pendingBtConnect?.name);
+                showToast(`配对成功：${name || addr}`);
 
                 // 刷新已配对设备列表
                 sendMessage('bluetooth', 'getPairedDevices', null, (pairResponse) => {
                     if (pairResponse.code === 0 && pairResponse.data?.devices) {
                         pairedDevices = pairResponse.data.devices;
                         pairedDevices.forEach(d => resolveBtName(d.addr, d.name));
+                        updateBluetoothStatusBar();
                         scheduleRenderBluetoothList();
                     }
                 });
 
-                // 配对成功后再尝试连接一次
-                if (!bluetoothStatus.connected && (!connectedDevice || connectedDevice.addr !== addr)) {
-                    pendingBtConnect = { addr, name };
-                    performBluetoothConnect(addr, name);
-                }
+                // 配对发生在当前 ACL 连接上；等待 profile connected 事件，不重复建链。
+            }
+            break;
+        case 'bluetooth:pairingCode':
+            {
+                const pairingCode = normalizeBluetoothPairingCode(message.data?.pairingCode);
+                if (!pairingCode || pairingCode === '000000') break;
+                const device = pendingBtConnect || {};
+                const modalBody = window.UIComponents?.buildBluetoothPairingModal
+                    ? window.UIComponents.buildBluetoothPairingModal({
+                        deviceIcon: getBluetoothDeviceIcon(device.class),
+                        name: device.name || '蓝牙设备',
+                        pairingCode
+                    })
+                    : pairingCode;
+                showModal('蓝牙配对', modalBody);
+                const confirmBtn = document.getElementById('modalConfirm');
+                const cancelBtn = document.getElementById('modalCancel');
+                if (confirmBtn) confirmBtn.textContent = '知道了';
+                if (cancelBtn) cancelBtn.style.display = 'none';
             }
             break;
         case 'bluetooth:disconnected':
             // 设备已断开
             if (message.data) {
                 console.log('[Bluetooth] 设备已断开:', message.data);
-                if (connectedDevice && connectedDevice.addr === message.data.addr) {
-                    bluetoothConnected = false; // 更新蓝牙连接状态
-                    bluetoothStatus.connected = false;
-                    bluetoothStatus.connectedDevice = null;
-                    pendingBtConnect = null;
-                    const btStatusEl = document.getElementById('btStatus');
-                    if (btStatusEl) btStatusEl.textContent = '未连接';
-                    updateCurrentBluetoothDevice();
-                    scheduleRenderBluetoothList();
-                }
+                bluetoothConnected = false;
+                bluetoothStatus.connected = false;
+                bluetoothStatus.connectedDevice = null;
+                connectedDevice = null;
+                pendingBtConnect = null;
+                audioRouteApplyState.routeQueued = false;
+                audioRouteRenderSettings();
+                updateBluetoothStatusBar();
+                updateCurrentBluetoothDevice();
+                scheduleRenderBluetoothList();
             }
             break;
 
@@ -487,7 +562,7 @@ function handleEvent(message) {
                 // 更新切换按钮显示
                 const switchBtn = document.getElementById('mediaSwitchBtn');
                 if (mediaSessions.length > 1) {
-                    switchBtn.style.display = 'inline-block';
+                    switchBtn.style.display = 'inline-flex';
                 } else {
                     switchBtn.style.display = 'none';
                 }
@@ -502,8 +577,7 @@ function handleEvent(message) {
                 // 更新文字信息（带动画）
                 updateMusicTextWithAnimation(title, artist);
 
-                const playBtn = document.getElementById('musicPlayBtn');
-                playBtn.textContent = isPlaying ? '⏸' : '▶';
+                updateMusicPlayButton(isPlaying);
 
                 // 更新专辑封面（带动画）
                 updateAlbumCoverWithAnimation(thumbnail);
@@ -524,10 +598,7 @@ function handleEvent(message) {
             if (message.data) {
                 console.log('[Bluetooth] 媒体状态:', message.data.state);
                 // 更新音乐播放器UI
-                const playBtn = document.getElementById('musicPlayBtn');
-                if (playBtn) {
-                    playBtn.textContent = message.data.state === 'playing' ? '⏸' : '▶';
-                }
+                updateMusicPlayButton(message.data.state === 'playing');
             }
             break;
         case 'bluetooth:volumeChanged':
@@ -554,12 +625,9 @@ function handleEvent(message) {
             // 初始化完成后获取 WiFi 状态
             sendMessage('wifi', 'getStatus', {}, (response) => {
                 if (response.code === 0 && response.data) {
-                    // 只合并需要的字段，避免覆盖本地结构
-                    wifiStatus.on = !!response.data.on;
-                    wifiStatus.mode = response.data.mode || 0;
-                    wifiStatus.connected = response.data.connected || false;
-                    wifiStatus.ssid = response.data.ssid || null;
-                    wifiStatus.ip = response.data.ip || null;
+                    applyWifiStatusSnapshot(response.data);
+                    updateWifiStatusBar();
+                    renderWifiList();
                 }
             });
             break;
@@ -577,24 +645,10 @@ function handleEvent(message) {
             // 扫描到网络
             if (message.data) {
                 console.log('[WiFi] 扫描到网络:', message.data);
-                const network = {
-                    ssid: message.data.ssid,
-                    bssid: message.data.bssid,
-                    rssi: message.data.rssi,
-                    security: getSecurityName(message.data.security),
-                    channel: message.data.channel
-                };
-                // 检查是否已存在相同SSID
-                const existingIndex = wifiNetworks.findIndex(n => n.ssid === network.ssid);
-                if (existingIndex >= 0) {
-                    // 已存在，保留信号强的那个（RSSI值越大越好，如-50比-80好）
-                    if (network.rssi > wifiNetworks[existingIndex].rssi) {
-                        wifiNetworks[existingIndex] = network;
-                        renderWifiList();
-                    }
-                } else {
-                    // 不存在，添加新网络
-                    wifiNetworks.push(network);
+                const network = createWifiNetworkFromScan(message.data);
+                if (network) {
+                    wifiActiveScanNetworks?.add(network.ssid);
+                    upsertWifiNetwork(network);
                     renderWifiList();
                 }
             }
@@ -603,24 +657,51 @@ function handleEvent(message) {
             // 扫描完成
             console.log('[WiFi] 扫描完成:', message.data);
             wifiStatus.scanning = false;
+            if (wifiActiveScanNetworks) {
+                wifiActiveScanNetworks = null;
+            }
+            ensureConnectedWifiVisible();
+            pruneStaleWifiNetworks();
             const networkCount = message.data?.count || wifiNetworks.length;
             // 静默扫描时不显示toast
-            if (wifiNetworks.length > 0) {
-                renderWifiList();
-            }
+            // 即使没有结果也要渲染空态，避免只剩下空的圆角容器。
+            renderWifiList();
+            startPendingWifiConnection();
+            if (!wifiConnectOperation) startWifiAutoScan();
             break;
         case 'wifi:connected':
             // WiFi 连接成功
             if (message.data) {
+                if (wifiConnectOperation && wifiConnectOperation.ssid !== message.data.ssid) {
+                    console.warn('[WiFi] 忽略与当前连接事务不匹配的成功事件:', message.data);
+                    initWifiStatus();
+                    break;
+                }
                 console.log('[WiFi] 连接成功:', message.data);
                 wifiStatus.on = true;
                 wifiStatus.connected = true;
+                wifiStatus.connecting = false;
                 wifiStatus.ssid = message.data.ssid;
                 wifiStatus.ip = message.data.ip;
-                // 更新状态栏
-                document.getElementById('wifiStatus').textContent = message.data.ssid || '已连接';
+                wifiStatus.rssi = normalizeWifiRssi(message.data.rssi)
+                    ?? normalizeWifiRssi(wifiNetworks.find(network => network.ssid === message.data.ssid)?.rssi);
+                wifiConnectionFailure = null;
+                ensureConnectedWifiVisible();
+                finishWifiConnection(message.data.ssid);
+                stopWifiStatusRefresh();
+                startWifiAutoScan(0);
+                updateWifiStatusBar();
                 // 更新网络列表
                 renderWifiList();
+                setTimeout(() => {
+                    if (!isWifiSettingsActive() || !wifiStatus.connected || wifiStatus.ssid !== message.data.ssid) return;
+                    sendMessage('wifi', 'getStatus', {}, (response) => {
+                        if (response.code !== 0 || !response.data) return;
+                        applyWifiStatusSnapshot(response.data);
+                        updateWifiStatusBar();
+                        renderWifiList();
+                    });
+                }, 500);
                 showToast(`已连接到 ${message.data.ssid}`);
             }
             break;
@@ -628,18 +709,35 @@ function handleEvent(message) {
             // WiFi 断开连接
             if (message.data) {
                 console.log('[WiFi] 断开连接:', message.data);
+                const disconnectedSsid = message.data.ssid || wifiStatus.ssid;
                 wifiStatus.connected = false;
+                if (!wifiConnectOperation) {
+                    wifiStatus.connecting = false;
+                }
                 wifiStatus.ssid = null;
                 wifiStatus.ip = null;
-                document.getElementById('wifiStatus').textContent = '未连接';
+                wifiStatus.rssi = null;
+                markWifiNetworkUnavailable(disconnectedSsid);
+                updateWifiStatusBar();
                 renderWifiList();
-                showToast(`已断开 ${message.data.ssid || ''} ${message.data.reason ? '(' + message.data.reason + ')' : ''}`);
+                showToast(`已断开 ${disconnectedSsid || ''} ${message.data.reason ? '(' + message.data.reason + ')' : ''}`);
+                setTimeout(initWifiStatus, 500);
             }
             break;
         case 'wifi:connectFailed':
             // WiFi 连接失败
             if (message.data) {
+                if (wifiConnectOperation && message.data.ssid &&
+                    wifiConnectOperation.ssid !== message.data.ssid) {
+                    console.warn('[WiFi] 忽略与当前连接事务不匹配的失败事件:', message.data);
+                    break;
+                }
                 console.log('[WiFi] 连接失败:', message.data);
+                wifiConnectionFailure = {
+                    ssid: message.data.ssid || wifiConnectOperation?.ssid || '',
+                    reason: formatWifiConnectionFailure(message.data.reason)
+                };
+                failWifiConnection(message.data.ssid);
                 showToast(`连接 ${message.data.ssid} 失败: ${message.data.reason || '未知原因'}`);
             }
             break;
@@ -708,11 +806,30 @@ function handleEvent(message) {
                 // 错误提示：仅在“更新面板已展开/更新进行中”时弹出，避免和检查更新的响应提示重复
                 if (message.data.status === 'error') {
                     const panel = document.getElementById('updateProgress');
-                    const panelVisible = panel && panel.style.display !== 'none';
+                    const panelVisible = panel && !panel.hidden && panel.style.display !== 'none';
                     if (panelVisible) {
                         const errText = message.data.error || message.data.detail || '联网更新失败';
                         showToast(errText, 3000);
                     }
+                }
+            }
+            break;
+        case 'panel:operationComplete':
+        case 'hid:operationComplete':
+        case 'rk628Debug:operationComplete':
+            settleDeviceOperation(message.data);
+            break;
+        case 'update:checkComplete':
+            if (message.data) {
+                const operationId = message.data.operationId || message.data.requestId;
+                if (secureUpdateCheckOperationId &&
+                    operationId === secureUpdateCheckOperationId) {
+                    secureUpdateCheckOperationId = null;
+                    finishSecureUpdateCheck(
+                        message.data.code,
+                        message.data.msg,
+                        message.data
+                    );
                 }
             }
             break;
@@ -738,6 +855,7 @@ function getSecurityName(securityCode) {
 // ========== 串口自动连接 ==========
 let serialConnected = false;
 let currentSerialPort = null; // 当前连接的串口名称
+let currentUsbId = null; // 下位机 challenge 报告的实际 CDC 控制器
 let serialAutoConnectTimer = null;
 let serialPollingTimer = null;
 let deviceScreenSwitchPromptPort = null;
@@ -762,17 +880,45 @@ function formatSpeed(bytesPerSec) {
     }
 }
 // 更新状态栏串口状态
-function updateSerialStatusBar(connected, port = null) {
+function normalizeUsbId(value) {
+    const usbId = Number(value);
+    return Number.isInteger(usbId) && (usbId === 0 || usbId === 1)
+        ? usbId
+        : null;
+}
+
+function usbVersionLabel(usbId) {
+    return usbId === 0 ? 'USB1.1' : usbId === 1 ? 'USB2.0' : '';
+}
+
+function updateSerialStatusBar(connected, port = null, usbId = null) {
     const statusIcon = document.getElementById('serialStatusIcon');
     const statusText = document.getElementById('serialStatus');
+    const usbIndicator = document.getElementById('usbPortIndicator');
     if (connected && port) {
         statusIcon.textContent = '✅';
         statusText.textContent = port;
         currentSerialPort = port;
+        currentUsbId = normalizeUsbId(usbId);
+        if (usbIndicator) {
+            usbIndicator.textContent = usbVersionLabel(currentUsbId);
+            usbIndicator.hidden = currentUsbId === null;
+            usbIndicator.title = currentUsbId === 0
+                ? '当前 CDC 来自硬件 USB0'
+                : currentUsbId === 1
+                    ? '当前 CDC 来自硬件 USB1'
+                    : '';
+        }
     } else {
         statusIcon.textContent = '🔌';
         statusText.textContent = '串口未连接';
         currentSerialPort = null;
+        currentUsbId = null;
+        if (usbIndicator) {
+            usbIndicator.textContent = '';
+            usbIndicator.hidden = true;
+            usbIndicator.title = '';
+        }
     }
 }
 // 更新状态栏网速
@@ -791,7 +937,7 @@ function startSerialAutoConnect() {
             console.log('[Serial] 服务启动成功:', response.data);
             if (response.data.status === 'connected' || response.data.status === 'already_connected') {
                 serialConnected = true;
-                updateSerialStatusBar(true, response.data.port);
+                updateSerialStatusBar(true, response.data.port, response.data.usbId);
                 promptSwitchToDeviceScreen(response.data.port);
             } else {
                 updateSerialStatusBar(false, null); // 显示未连接状态，等待后端事件
@@ -990,15 +1136,29 @@ window.goToPage = (page) => {
     });
 };
 function initSettingsNav(defaultTargetId = null) {
-    const nav = document.querySelector('.settings-nav');
+    const settingsPage = document.getElementById('page-settings');
+    const nav = settingsPage?.querySelector('.settings-nav');
     if (!nav) {
         return;
     }
     const buttons = Array.from(nav.querySelectorAll('.settings-nav-item'));
-    const panels = Array.from(document.querySelectorAll('.settings-section'));
+    const panels = Array.from(settingsPage.querySelectorAll('.settings-section'));
     if (buttons.length === 0 || panels.length === 0) {
         return;
     }
+    const syncSettingsDetailHeight = () => {
+        if (window.matchMedia('(max-width: 720px)').matches) {
+            settingsPage.style.removeProperty('--settings-detail-height');
+            return;
+        }
+        settingsPage.style.setProperty('--settings-detail-height', `${nav.offsetHeight}px`);
+    };
+    if (!nav._settingsDetailResizeObserver) {
+        nav._settingsDetailResizeObserver = new ResizeObserver(syncSettingsDetailHeight);
+        nav._settingsDetailResizeObserver.observe(nav);
+        window.addEventListener('resize', syncSettingsDetailHeight);
+    }
+    requestAnimationFrame(syncSettingsDetailHeight);
     const activate = (targetId) => {
         panels.forEach((panel) => {
             panel.classList.toggle('active', panel.id === targetId);
@@ -1009,10 +1169,10 @@ function initSettingsNav(defaultTargetId = null) {
 
         // 仅在对应页面启动自动扫描，离开页面立即停止
         if (targetId === 'settings-wifi') {
+            beginWifiScanSession();
             initWifiStatus();
-            startWifiAutoScan();
-            scanWifi();
         } else {
+            stopWifiStatusRefresh();
             stopWifiAutoScan();
             stopWifiDeviceScan();
         }
@@ -1029,6 +1189,7 @@ function initSettingsNav(defaultTargetId = null) {
 
         if (targetId === 'settings-display') {
             rk628ScaleModeLoad(true);
+            statusLedConfigLoad(true);
         }
     };
     if (nav.dataset.bound !== '1') {
@@ -1195,11 +1356,11 @@ function scheduleHomeClockTick() {
         clearTimeout(homeClockState.tickTimer);
         homeClockState.tickTimer = null;
     }
-    // Update on next minute boundary for stability.
+    // Check once per second so small host/local clock offsets cannot skip a minute boundary.
     const nowMs = getHomeClockNowMs();
-    let wait = 60000 - (nowMs % 60000);
+    let wait = 1000 - (nowMs % 1000);
     if (wait < 50) {
-        wait += 60000;
+        wait += 1000;
     }
     homeClockState.tickTimer = setTimeout(() => {
         renderHomeClock();
@@ -1222,6 +1383,7 @@ function syncHomeClockFromHost() {
             homeClockState.basePerf = performance.now();
             homeClockState.lastKey = '';
             renderHomeClock();
+            scheduleHomeClockTick();
             return;
         }
         // Fallback to local time.
@@ -1230,6 +1392,7 @@ function syncHomeClockFromHost() {
         homeClockState.basePerf = 0;
         homeClockState.lastKey = '';
         renderHomeClock();
+        scheduleHomeClockTick();
     });
 }
 
@@ -1242,8 +1405,8 @@ function startHomeClock() {
         clearInterval(homeClockState.resyncTimer);
         homeClockState.resyncTimer = null;
     }
-    // Resync every minute to correct drift.
-    homeClockState.resyncTimer = setInterval(syncHomeClockFromHost, 60 * 1000);
+    // The monotonic local tick handles display updates; host time only corrects long-term drift.
+    homeClockState.resyncTimer = setInterval(syncHomeClockFromHost, 5 * 60 * 1000);
 
     if (!homeClockState.initialized) {
         homeClockState.initialized = true;
@@ -1414,19 +1577,19 @@ function updatePerformanceDisplay(data) {
     const miniTempValue = document.getElementById('miniTempValue');
     if (miniCpuValue) {
         miniCpuValue.textContent = Math.round(data.cpu) + '%';
-        drawMiniChart('miniCpuChart', data.cpu, '#0a84ff');
+        drawMiniChart('miniCpuChart', data.cpu);
     }
     if (miniMemValue && data.memory) {
         miniMemValue.textContent = data.memory.used.toFixed(1) + ' GB';
-        drawMiniChart('miniMemChart', data.memory.percent, '#30d158');
+        drawMiniChart('miniMemChart', data.memory.percent);
     }
     if (miniTempValue) {
         if (data.temperature > 0) {
             miniTempValue.textContent = Math.round(data.temperature) + '°C';
-            drawMiniChart('miniTempChart', data.temperature, '#ff9f0a');
+            drawMiniChart('miniTempChart', data.temperature);
         } else {
             miniTempValue.textContent = 'N/A';
-            drawMiniChart('miniTempChart', 0, '#ff9f0a');
+            drawMiniChart('miniTempChart', 0);
         }
     }
     // 更新状态栏网络速度显示（如果有网络数据）
@@ -1465,29 +1628,22 @@ function updatePerformanceDetailPage(data) {
     };
     updateMonitorData(formattedData);
 }
-function drawMiniChart(id, value, color) {
+function drawMiniChart(id, value) {
     const el = document.getElementById(id);
     if (!el) return;
-    // 使用多重渐变创建更现代的视觉效果
-    const percentage = Math.min(100, Math.max(0, value));
-    // 根据使用率调整颜色强度
-    let colorIntensity = '50';
-    if (percentage > 80) {
-        colorIntensity = '80'; // 高负载时更明显
-    } else if (percentage > 50) {
-        colorIntensity = '60';
+    const numericValue = Number(value);
+    const percentage = Number.isFinite(numericValue)
+        ? Math.min(100, Math.max(0, numericValue))
+        : 0;
+    const fill = el.querySelector('.mini-chart-fill');
+    if (fill) fill.style.width = `${percentage}%`;
+    el.setAttribute('aria-valuenow', String(Math.round(percentage)));
+
+    const item = el.closest('.perf-item-large');
+    if (item) {
+        item.classList.toggle('is-warning', percentage >= 70 && percentage < 85);
+        item.classList.toggle('is-critical', percentage >= 85);
     }
-    el.style.background = `
-        linear-gradient(to right,
-            ${color}${colorIntensity} 0%,
-            ${color}40 ${percentage * 0.7}%,
-            ${color}20 ${percentage}%,
-            rgba(255,255,255,0.03) ${percentage}%,
-            rgba(255,255,255,0.01) 100%
-        )
-    `;
-    // 添加动画效果
-    el.style.transition = 'background 0.8s cubic-bezier(0.4, 0, 0.2, 1)';
 }
 
 // 截图
@@ -1870,10 +2026,11 @@ function ai2LsDel(k) {
     try { localStorage.removeItem(k); } catch { }
 }
 
-const AUDIO_ROUTE_HDMI = 'hdmi';
-const AUDIO_ROUTE_UAC = 'uac';
+const AUDIO_SOURCE_HDMI = 'hdmi';
+const AUDIO_SOURCE_UAC = 'uac';
 const AUDIO_MIC_ONBOARD = 'onboard';
 const AUDIO_MIC_HEADSET = 'headset';
+const AUDIO_MIC_BLUETOOTH = 'bluetooth';
 const AUDIO_EQ_DEFAULT_FREQS = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
 const AUDIO_EQ_MIN_FREQ = 20;
 const AUDIO_EQ_MAX_FREQ = 22000;
@@ -1887,10 +2044,77 @@ const AUDIO_EQ_TYPES = [
     { value: 'lowPass', label: '低通', id: 1 }
 ];
 let audioRouteState = {
-    localPlayback: AUDIO_ROUTE_HDMI,
-    bluetoothOutput: AUDIO_ROUTE_UAC,
+    audioSource: AUDIO_SOURCE_HDMI,
     micInput: AUDIO_MIC_ONBOARD
 };
+
+let audioRouteCommitted = { ...audioRouteState };
+const deviceOperationWaiters = new Map();
+const deviceOperationResults = new Map();
+
+function cacheDeviceOperationResult(operationId, data) {
+    deviceOperationResults.set(operationId, data);
+    while (deviceOperationResults.size > 32) {
+        deviceOperationResults.delete(deviceOperationResults.keys().next().value);
+    }
+    setTimeout(() => {
+        if (deviceOperationResults.get(operationId) === data) {
+            deviceOperationResults.delete(operationId);
+        }
+    }, 60000);
+}
+
+function settleDeviceOperation(data) {
+    const operationId = data?.operationId || data?.requestId;
+    if (!operationId) return;
+    const waiter = deviceOperationWaiters.get(operationId);
+    if (!waiter) {
+        cacheDeviceOperationResult(operationId, data);
+        return;
+    }
+    deviceOperationWaiters.delete(operationId);
+    clearTimeout(waiter.timer);
+    if (data.code === 0) waiter.resolve(data);
+    else waiter.reject(data);
+}
+
+function waitForDeviceOperation(operationId, timeoutMs = 30000) {
+    if (!operationId || deviceOperationWaiters.has(operationId)) {
+        return Promise.reject({ code: 2, msg: '无效或重复的 operationId' });
+    }
+    const completed = deviceOperationResults.get(operationId);
+    if (completed) {
+        deviceOperationResults.delete(operationId);
+        return completed.code === 0
+            ? Promise.resolve(completed)
+            : Promise.reject(completed);
+    }
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+            deviceOperationWaiters.delete(operationId);
+            reject({ code: 5, msg: '等待设备操作完成超时' });
+        }, timeoutMs);
+        deviceOperationWaiters.set(operationId, { resolve, reject, timer });
+    });
+}
+let audioRouteApplyState = {
+    active: '',
+    routeRunning: false,
+    routeQueued: false,
+    routeSeq: 0,
+    micRunning: false,
+    micQueued: false,
+    micSeq: 0,
+    syncRunning: false
+};
+
+function audioRouteSetStatus(text, state = '') {
+    const el = document.getElementById('audioRouteStatus');
+    if (!el) return;
+    el.textContent = `音频来源状态：${text}`;
+    if (state) el.dataset.state = state;
+    else delete el.dataset.state;
+}
 
 let audioEqState = {
     loaded: false,
@@ -1901,20 +2125,18 @@ let audioEqState = {
     bands: AUDIO_EQ_DEFAULT_FREQS.map((freq, index) => ({ index, freq, gain: 0, q: 0.7, type: 'peak' }))
 };
 
-function audioRouteNormalize(value, fallback = AUDIO_ROUTE_HDMI) {
-    return value === AUDIO_ROUTE_UAC ? AUDIO_ROUTE_UAC : fallback;
+function audioSourceNormalize(value, fallback = AUDIO_SOURCE_HDMI) {
+    return value === AUDIO_SOURCE_HDMI || value === AUDIO_SOURCE_UAC ? value : fallback;
 }
 
 function audioMicNormalize(value, fallback = AUDIO_MIC_ONBOARD) {
-    return value === AUDIO_MIC_HEADSET ? AUDIO_MIC_HEADSET : fallback;
+    return value === AUDIO_MIC_HEADSET || value === AUDIO_MIC_BLUETOOTH ? value : fallback;
 }
 
 function audioRouteRenderSettings() {
-    const localSelect = document.getElementById('audioLocalRouteSelect');
-    const btSelect = document.getElementById('audioBluetoothRouteSelect');
+    const sourceSelect = document.getElementById('audioSourceSelect');
     const micSelect = document.getElementById('audioMicRouteSelect');
-    if (localSelect) localSelect.value = audioRouteState.localPlayback;
-    if (btSelect) btSelect.value = audioRouteState.bluetoothOutput;
+    if (sourceSelect) sourceSelect.value = audioRouteState.audioSource;
     if (micSelect) micSelect.value = audioRouteState.micInput;
 }
 
@@ -1924,17 +2146,16 @@ function audioRouteDeviceReady() {
 
 function audioRouteApplyDeviceData(data) {
     if (!data) return;
-    if (data.local_playback_route) {
-        audioRouteState.localPlayback = audioRouteNormalize(data.local_playback_route, AUDIO_ROUTE_HDMI);
+    if (data.audio_source) {
+        audioRouteState.audioSource = audioSourceNormalize(data.audio_source, AUDIO_SOURCE_HDMI);
     }
-    if (data.bluetooth_output_route) {
-        audioRouteState.bluetoothOutput = audioRouteNormalize(data.bluetooth_output_route, AUDIO_ROUTE_UAC);
-    }
+    audioRouteCommitted.audioSource = audioRouteState.audioSource;
 }
 
 function audioRouteApplyMicData(data) {
     if (!data || !data.source) return;
     audioRouteState.micInput = audioMicNormalize(data.source, AUDIO_MIC_ONBOARD);
+    audioRouteCommitted.micInput = audioRouteState.micInput;
 }
 
 function sendAudioCommand(cmd, data = null) {
@@ -1950,13 +2171,17 @@ function sendAudioCommand(cmd, data = null) {
 }
 
 async function audioRouteSyncFromDevice() {
+    if (audioRouteApplyState.syncRunning || audioRouteApplyState.active) return false;
+    audioRouteApplyState.syncRunning = true;
     if (!audioRouteDeviceReady()) {
         audioRouteRenderSettings();
+        audioRouteSetStatus('等待下位机连接');
+        audioRouteApplyState.syncRunning = false;
         return false;
     }
 
     try {
-        const result = await sendRK628Command(17, null);
+        const result = await sendRK628Command(21, null);
         const data = result?.data || {};
         audioRouteApplyDeviceData(data);
         try {
@@ -1972,71 +2197,139 @@ async function audioRouteSyncFromDevice() {
             console.warn('[AudioRoute] sync EQ failed:', eqErr);
         }
         audioRouteRenderSettings();
+        audioRouteSetStatus('已从下位机确认', 'success');
+        audioRouteApplyState.syncRunning = false;
         return true;
     } catch (err) {
         console.warn('[AudioRoute] sync from device failed:', err);
         audioRouteRenderSettings();
+        audioRouteSetStatus(formatDeviceCommandError(err, '读取音频来源失败'), 'error');
+        audioRouteApplyState.syncRunning = false;
         return false;
     }
 }
 
-function audioRouteBuildDevicePayload() {
-    return {
-        local_playback_route: audioRouteState.localPlayback,
-        bluetooth_output_route: audioRouteState.bluetoothOutput
-    };
+async function audioRouteApplyToDevice(silent = false) {
+    if (!audioRouteDeviceReady()) {
+        if (!silent) showToast('下位机未连接，无法修改音频来源', 2500);
+        audioRouteSetStatus('等待下位机连接');
+        audioRouteRenderSettings();
+        return null;
+    }
+    audioRouteApplyState.routeSeq += 1;
+    audioRouteApplyState.routeQueued = true;
+    if (audioRouteApplyState.routeRunning) return null;
+
+    while (audioRouteApplyState.active && audioRouteApplyState.active !== 'route' && audioRouteDeviceReady()) {
+        await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    if (!audioRouteDeviceReady()) return null;
+
+    audioRouteApplyState.active = 'route';
+    audioRouteApplyState.routeRunning = true;
+    let lastResponse = null;
+    try {
+        while (audioRouteApplyState.routeQueued && audioRouteDeviceReady()) {
+            audioRouteApplyState.routeQueued = false;
+            const seq = audioRouteApplyState.routeSeq;
+            const desired = audioRouteState.audioSource;
+            audioRouteSetStatus('正在切换音频来源...', 'busy');
+            try {
+                lastResponse = await sendRK628AudioCommandWithTimeout(20, { audio_source: desired });
+                const operationId = lastResponse?.data?.operationId;
+                if (!lastResponse?.data?.accepted || !operationId) {
+                    throw { code: 9000, msg: '设备未接受异步音频来源操作' };
+                }
+                await waitForDeviceOperation(operationId, 12000);
+                const confirmed = await sendRK628AudioCommandWithTimeout(21, null, 8000);
+                const data = confirmed?.data || {};
+                if (data.audio_source !== desired) {
+                    throw { code: 1, msg: '下位机回读的音频来源与目标不一致' };
+                }
+                if (seq === audioRouteApplyState.routeSeq) {
+                    audioRouteApplyDeviceData(data);
+                    audioRouteRenderSettings();
+                    audioRouteSetStatus('音频来源已确认', 'success');
+                    if (!silent) showToast('音频来源已确认');
+                }
+            } catch (err) {
+                if (seq === audioRouteApplyState.routeSeq) {
+                    audioRouteState.audioSource = audioRouteCommitted.audioSource;
+                    audioRouteRenderSettings();
+                    const message = formatDeviceCommandError(err, '音频来源切换失败');
+                    audioRouteSetStatus(message, 'error');
+                    if (!silent) showToast(message, 3500);
+                }
+                console.warn('[AudioRoute] audio source apply failed:', err);
+            }
+        }
+    } finally {
+        audioRouteApplyState.routeRunning = false;
+        if (audioRouteApplyState.active === 'route') audioRouteApplyState.active = '';
+    }
+    return lastResponse;
 }
 
-function audioRouteApplyToDevice(silent = false) {
-    return new Promise((resolve) => {
-        if (!audioRouteDeviceReady()) {
-            if (!silent) {
-                showToast('下位机未连接，无法修改音频路由', 2500);
+async function audioMicApplyToDevice(silent = false) {
+    if (!audioRouteDeviceReady()) {
+        if (!silent) showToast('下位机未连接，无法修改麦克风来源', 2500);
+        audioRouteSetStatus('等待下位机连接');
+        audioRouteRenderSettings();
+        return null;
+    }
+    audioRouteApplyState.micSeq += 1;
+    audioRouteApplyState.micQueued = true;
+    if (audioRouteApplyState.micRunning) return null;
+
+    while (audioRouteApplyState.active && audioRouteApplyState.active !== 'mic' && audioRouteDeviceReady()) {
+        await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    if (!audioRouteDeviceReady()) return null;
+
+    audioRouteApplyState.active = 'mic';
+    audioRouteApplyState.micRunning = true;
+    let lastResponse = null;
+    try {
+        while (audioRouteApplyState.micQueued && audioRouteDeviceReady()) {
+            audioRouteApplyState.micQueued = false;
+            const seq = audioRouteApplyState.micSeq;
+            const desired = audioRouteState.micInput;
+            audioRouteSetStatus('正在切换麦克风来源...', 'busy');
+            try {
+                lastResponse = await sendAudioCommandWithTimeout('setMicSource', { source: desired });
+                let confirmed = null;
+                for (let attempt = 0; attempt < 8; attempt += 1) {
+                    await new Promise(resolve => setTimeout(resolve, 250));
+                    confirmed = await sendAudioCommandWithTimeout('getMicSource', null, 8000);
+                    if (confirmed?.data?.source === desired &&
+                        (desired !== AUDIO_MIC_BLUETOOTH || confirmed?.data?.available !== false)) break;
+                }
+                if (!confirmed?.data || confirmed.data.source !== desired ||
+                    (desired === AUDIO_MIC_BLUETOOTH && confirmed.data.available === false)) {
+                    throw { code: 1, msg: '下位机未确认麦克风来源已生效' };
+                }
+                if (seq === audioRouteApplyState.micSeq) {
+                    audioRouteApplyMicData(confirmed.data);
+                    audioRouteRenderSettings();
+                    audioRouteSetStatus('麦克风来源已确认', 'success');
+                    if (!silent) showToast('麦克风来源已确认');
+                }
+            } catch (err) {
+                if (seq === audioRouteApplyState.micSeq) {
+                    audioRouteState.micInput = audioRouteCommitted.micInput;
+                    audioRouteRenderSettings();
+                    const message = formatDeviceCommandError(err, '麦克风来源切换失败');
+                    audioRouteSetStatus(message, 'error');
+                    if (!silent) showToast(message, 3500);
+                }
+                console.warn('[AudioRoute] microphone source apply failed:', err);
             }
-            audioRouteRenderSettings();
-            resolve(null);
-            return;
         }
-
-        sendRK628Command(20, audioRouteBuildDevicePayload()).then((resp) => {
-            audioRouteApplyDeviceData(resp?.data);
-            audioRouteRenderSettings();
-            if (!silent) showToast('音频路由已更新');
-            resolve(resp);
-        }).catch((err) => {
-            console.warn('[AudioRoute] 设备端暂未支持或设置失败:', err);
-            if (!silent) {
-                showToast('音频路由设置失败，请检查下位机状态', 2500);
-            }
-            resolve(null);
-        });
-    });
-}
-
-function audioMicApplyToDevice(silent = false) {
-    return new Promise((resolve) => {
-        if (!audioRouteDeviceReady()) {
-            if (!silent) {
-                showToast('下位机未连接，无法修改麦克风来源', 2500);
-            }
-            audioRouteRenderSettings();
-            resolve(null);
-            return;
-        }
-
-        sendAudioCommand('setMicSource', { source: audioRouteState.micInput }).then((resp) => {
-            audioRouteApplyMicData(resp?.data);
-            audioRouteRenderSettings();
-            if (!silent) showToast('麦克风来源已更新');
-            resolve(resp);
-        }).catch((err) => {
-            console.warn('[AudioRoute] 麦克风来源设置失败:', err);
-            if (!silent) {
-                showToast('麦克风来源设置失败，请检查下位机状态', 2500);
-            }
-            resolve(null);
-        });
-    });
+    } finally {
+        audioRouteApplyState.micRunning = false;
+        if (audioRouteApplyState.active === 'mic') audioRouteApplyState.active = '';
+    }
+    return lastResponse;
 }
 
 function audioEqFormatFreq(freq) {
@@ -2160,10 +2453,10 @@ function audioEqRender() {
     container.innerHTML = `
         <div class="audio-eq-workspace">
             <div class="audio-eq-graph-card">
-                <div class="audio-eq-gain-mark top">+18 dB</div>
-                <div class="audio-eq-gain-mark mid">0 dB</div>
-                <div class="audio-eq-gain-mark bottom">-18 dB</div>
                 <div class="audio-eq-plot" id="audioEqPlot">
+                    <div class="audio-eq-gain-mark top">+18 dB</div>
+                    <div class="audio-eq-gain-mark mid">0 dB</div>
+                    <div class="audio-eq-gain-mark bottom">-18 dB</div>
                     <svg class="audio-eq-curve" viewBox="0 0 1000 360" preserveAspectRatio="none" aria-hidden="true">
                         <polyline id="audioEqCurveLine" points="${audioEqCurvePoints()}" />
                     </svg>
@@ -2394,49 +2687,24 @@ function audioEqReset() {
 function initAudioRouteSettings() {
     audioRouteRenderSettings();
 
-    const localSelect = document.getElementById('audioLocalRouteSelect');
-    const btSelect = document.getElementById('audioBluetoothRouteSelect');
+    const sourceSelect = document.getElementById('audioSourceSelect');
     const micSelect = document.getElementById('audioMicRouteSelect');
 
-    if (localSelect && !localSelect.dataset.bound) {
-        localSelect.dataset.bound = '1';
-        localSelect.addEventListener('change', async (e) => {
-            const previous = audioRouteState.localPlayback;
-            audioRouteState.localPlayback = audioRouteNormalize(e.target.value, AUDIO_ROUTE_HDMI);
+    if (sourceSelect && !sourceSelect.dataset.bound) {
+        sourceSelect.dataset.bound = '1';
+        sourceSelect.addEventListener('change', async (e) => {
+            audioRouteState.audioSource = audioSourceNormalize(e.target.value, AUDIO_SOURCE_HDMI);
             audioRouteRenderSettings();
-            const resp = await audioRouteApplyToDevice(false);
-            if (!resp) {
-                audioRouteState.localPlayback = previous;
-                audioRouteRenderSettings();
-            }
-        });
-    }
-
-    if (btSelect && !btSelect.dataset.bound) {
-        btSelect.dataset.bound = '1';
-        btSelect.addEventListener('change', async (e) => {
-            const previous = audioRouteState.bluetoothOutput;
-            audioRouteState.bluetoothOutput = audioRouteNormalize(e.target.value, AUDIO_ROUTE_UAC);
-            audioRouteRenderSettings();
-            const resp = await audioRouteApplyToDevice(false);
-            if (!resp) {
-                audioRouteState.bluetoothOutput = previous;
-                audioRouteRenderSettings();
-            }
+            await audioRouteApplyToDevice(false);
         });
     }
 
     if (micSelect && !micSelect.dataset.bound) {
         micSelect.dataset.bound = '1';
         micSelect.addEventListener('change', async (e) => {
-            const previous = audioRouteState.micInput;
             audioRouteState.micInput = audioMicNormalize(e.target.value, AUDIO_MIC_ONBOARD);
             audioRouteRenderSettings();
-            const resp = await audioMicApplyToDevice(false);
-            if (!resp) {
-                audioRouteState.micInput = previous;
-                audioRouteRenderSettings();
-            }
+            await audioMicApplyToDevice(false);
         });
     }
 
@@ -5121,6 +5389,18 @@ if (typeof window !== 'undefined') {
 // SMTC (System Media Transport Controls) 只支持基本的播放控制
 // 不支持: 播放列表、进度条、音量控制等
 let musicPlaying = true;
+function updateMusicPlayButton(isPlaying) {
+    const playBtn = document.getElementById('musicPlayBtn');
+    if (!playBtn) return;
+
+    musicPlaying = Boolean(isPlaying);
+    playBtn.classList.toggle('is-playing', musicPlaying);
+
+    const label = musicPlaying ? '暂停' : '播放';
+    playBtn.setAttribute('aria-label', label);
+    playBtn.title = label;
+}
+
 function updateMusicStatus(data) {
     // 从后端SMTC接收的音乐状态更新
     if (data.title !== undefined || data.artist !== undefined) {
@@ -5133,14 +5413,14 @@ function updateMusicStatus(data) {
     }
 
     if (data.isPlaying !== undefined) {
-        musicPlaying = data.isPlaying;
-        document.getElementById('musicPlayBtn').textContent = musicPlaying ? '⏸' : '▶';
+        updateMusicPlayButton(data.isPlaying);
     }
 }
 // ========== 音乐控制 ==========
 let currentMediaSessionId = 0;
 let mediaSessions = [];
 let isBluetoothReceiveMode = false;
+let musicPlayPauseRequestSeq = 0;
 
 // 专辑封面切换动画
 function updateAlbumCoverWithAnimation(thumbnail) {
@@ -5220,7 +5500,7 @@ function getSystemMediaInfo() {
             // 显示或隐藏切换按钮
             const switchBtn = document.getElementById('mediaSwitchBtn');
             if (mediaSessions.length > 1) {
-                switchBtn.style.display = 'inline-block';
+                switchBtn.style.display = 'inline-flex';
             } else {
                 switchBtn.style.display = 'none';
             }
@@ -5240,8 +5520,7 @@ function getCurrentMediaInfo() {
             // 更新文字信息（带动画）
             updateMusicTextWithAnimation(title, artist);
 
-            const playBtn = document.getElementById('musicPlayBtn');
-            playBtn.textContent = isPlaying ? '⏸' : '▶';
+            updateMusicPlayButton(isPlaying);
 
             // 更新专辑封面（带动画）
             updateAlbumCoverWithAnimation(thumbnail);
@@ -5250,22 +5529,32 @@ function getCurrentMediaInfo() {
 }
 
 window.musicPlayPause = () => {
+    const requestSeq = ++musicPlayPauseRequestSeq;
+    const previousPlaying = musicPlaying;
+    updateMusicPlayButton(!previousPlaying);
+
+    const handleResponse = (response) => {
+        if (requestSeq !== musicPlayPauseRequestSeq) return;
+        if (!response || response.code !== 0) {
+            updateMusicPlayButton(previousPlaying);
+            showToast(`操作失败: ${response?.msg || '未知错误'}`);
+            return;
+        }
+
+        if (!isBluetoothReceiveMode) {
+            setTimeout(() => {
+                if (requestSeq === musicPlayPauseRequestSeq) {
+                    getCurrentMediaInfo();
+                }
+            }, 600);
+        }
+    };
+
     if (isBluetoothReceiveMode) {
         // 蓝牙模式
-        sendMessage('bluetooth', 'playPause', null, (response) => {
-            if (response.code === 0) {
-                console.log('[Music] 播放/暂停命令已发送');
-            } else {
-                showToast(`操作失败: ${response.msg || '未知错误'}`);
-            }
-        });
+        sendMessage('bluetooth', 'playPause', null, handleResponse);
     } else {
-        // 系统媒体模式（后端会自动推送更新事件）
-        sendMessage('system', 'mediaPlayPause', { sessionId: currentMediaSessionId }, (response) => {
-            if (response && response.code !== 0) {
-                showToast('操作失败');
-            }
-        });
+        sendMessage('system', 'mediaPlayPause', { sessionId: currentMediaSessionId }, handleResponse);
     }
 };
 
@@ -6463,399 +6752,348 @@ setBrowserZoom(currentZoom);
 const monitorData = {
     cpu: [], memory: [], temperature: [], networkDown: [], networkUp: []
 };
-const MAX_DATA_POINTS = 30; // 减少数据点数量以增加点间距
+const MAX_DATA_POINTS = 30;
+const CHART_ANIMATION_DURATION = 520;
 let monitorUpdateInterval = null;
-let chartAnimations = {}; // 存储各个图表的动画状态
+let chartAnimations = {};
 function initMonitoring() {
-    // 清除之前的定时器（现在使用订阅制，不再需要定时器）
     if (monitorUpdateInterval) {
         clearInterval(monitorUpdateInterval);
         monitorUpdateInterval = null;
     }
-    // 初始化canvas尺寸
-    ['cpuChart', 'memChart', 'tempChart', 'netChart'].forEach(id => {
-        const canvas = document.getElementById(id);
-        if (canvas) {
-            const rect = canvas.getBoundingClientRect();
-            canvas.width = rect.width * 2;
-            canvas.height = rect.height * 2;
-            const ctx = canvas.getContext('2d');
-            ctx.scale(2, 2);
-        }
-    });
-    // 更新频率选择器 - 现在不使用了，因为使用订阅制(固定2秒)
     const intervalSelect = document.getElementById('updateInterval');
     if (intervalSelect) {
-        intervalSelect.style.display = 'none'; // 隐藏选择器
+        intervalSelect.style.display = 'none';
     }
+    drawAllMonitorCharts();
     console.log('[Monitor] 性能监控详情页已初始化，数据来自订阅推送');
 }
+
+function sendAudioCommandWithTimeout(cmd, data = null, timeoutMs = 12000) {
+    return new Promise((resolve, reject) => {
+        sendMessageWithTimeout('audio', cmd, data, timeoutMs, (response) => {
+            if (response?.code === 0) resolve(response);
+            else reject(response || { code: 5, msg: '设备未返回响应' });
+        });
+    });
+}
+
+function sendRK628AudioCommandWithTimeout(action, data = null, timeoutMs = 12000) {
+    return new Promise((resolve, reject) => {
+        const commandData = { action };
+        if (data) commandData.data = data;
+        sendMessageWithTimeout('panel', 'rk628Config', commandData, timeoutMs, (response) => {
+            if (response?.code === 0) resolve(response);
+            else reject(response || { code: 5, msg: '设备未返回响应' });
+        });
+    });
+}
+
+function getLastFiniteValue(values, fallback = 0) {
+    for (let index = values.length - 1; index >= 0; index--) {
+        const value = Number(values[index]);
+        if (Number.isFinite(value)) return value;
+    }
+    return fallback;
+}
+
+function getAnimatedValue(animation, now = performance.now()) {
+    if (!animation) return null;
+    const progress = Math.min(1, Math.max(0, (now - animation.startedAt) / CHART_ANIMATION_DURATION));
+    const eased = 1 - Math.pow(1 - progress, 3);
+    return animation.from + (animation.to - animation.from) * eased;
+}
+
+function startChartAnimation(canvasId, fromValue, toValue) {
+    const current = getAnimatedValue(chartAnimations[canvasId]);
+    chartAnimations[canvasId] = {
+        from: Number.isFinite(current) ? current : fromValue,
+        to: toValue,
+        startedAt: performance.now(),
+        frameId: null
+    };
+}
+
+function prepareChartCanvas(canvas) {
+    const rect = canvas.getBoundingClientRect();
+    const width = Math.max(1, rect.width);
+    const height = Math.max(1, rect.height);
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const pixelWidth = Math.round(width * dpr);
+    const pixelHeight = Math.round(height * dpr);
+    if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+        canvas.width = pixelWidth;
+        canvas.height = pixelHeight;
+    }
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return { ctx, width, height };
+}
+
+function updateMonitorValue(id, text) {
+    const element = document.getElementById(id);
+    if (!element || element.textContent === text) return;
+    element.textContent = text;
+    element.classList.remove('is-updating');
+    void element.offsetWidth;
+    element.classList.add('is-updating');
+}
+
 function updateMonitorData(data) {
-    monitorData.cpu.push(data.cpu);
-    monitorData.memory.push((data.memory / data.memoryTotal) * 100);
-    monitorData.temperature.push(data.temperature);
-    monitorData.networkDown.push(data.network.download);
-    monitorData.networkUp.push(data.network.upload);
+    const cpu = Number(data.cpu) || 0;
+    const memoryTotal = Number(data.memoryTotal) || 0;
+    const memory = Number(data.memory) || 0;
+    const memoryPercent = memoryTotal > 0 ? (memory / memoryTotal) * 100 : 0;
+    const temperature = Number(data.temperature) || 0;
+    const networkDown = Number(data.network.download) || 0;
+    const networkUp = Number(data.network.upload) || 0;
+    const previous = {
+        cpu: getLastFiniteValue(monitorData.cpu, cpu),
+        memory: getLastFiniteValue(monitorData.memory, memoryPercent),
+        temperature: getLastFiniteValue(monitorData.temperature, temperature),
+        networkDown: getLastFiniteValue(monitorData.networkDown, networkDown),
+        networkUp: getLastFiniteValue(monitorData.networkUp, networkUp)
+    };
+
+    monitorData.cpu.push(cpu);
+    monitorData.memory.push(memoryPercent);
+    if (temperature > 0) monitorData.temperature.push(temperature);
+    monitorData.networkDown.push(networkDown);
+    monitorData.networkUp.push(networkUp);
     Object.keys(monitorData).forEach(key => {
         if (monitorData[key].length > MAX_DATA_POINTS) monitorData[key].shift();
     });
-    // 当数据更新时,稍微降低动画进度,让新数据点有入场动画
-    ['cpuChart', 'memChart', 'tempChart', 'netChart'].forEach(chartId => {
-        if (chartAnimations[chartId] && chartAnimations[chartId].progress >= 0.98) {
-            // 只在已完成动画时才触发新数据动画,避免干扰初始动画
-            chartAnimations[chartId].progress = 0.85;
-            chartAnimations[chartId].targetProgress = 1;
-        }
-    });
-    document.getElementById('cpuValue').textContent = `${Math.round(data.cpu)}%`;
-    document.getElementById('memValue').textContent =
-        `${(data.memory / 1024).toFixed(1)}/${(data.memoryTotal / 1024).toFixed(1)} GB`;
-    document.getElementById('tempValue').textContent = `${Math.round(data.temperature)}°C`;
-    // 更新网络数值显示（与状态栏格式一致）
-    const netValueElem = document.getElementById('netValue');
-    if (netValueElem) {
-        const netText = `↓${formatSpeed(data.network.download)} ↑${formatSpeed(data.network.upload)}`;
-        netValueElem.textContent = netText;
-        console.log('[Monitor] Updated netValue:', netText, 'Element:', netValueElem);
-    } else {
-        console.error('[Monitor] netValue element not found!');
-    }
+
+    startChartAnimation('cpuChart', previous.cpu, cpu);
+    startChartAnimation('memChart', previous.memory, memoryPercent);
+    if (temperature > 0) startChartAnimation('tempChart', previous.temperature, temperature);
+    startChartAnimation('netChartDown', previous.networkDown, networkDown);
+    startChartAnimation('netChartUp', previous.networkUp, networkUp);
+
+    updateMonitorValue('cpuValue', `${Math.round(cpu)}%`);
+    updateMonitorValue('memValue', `${(memory / 1024).toFixed(1)} / ${(memoryTotal / 1024).toFixed(1)} GB`);
+    updateMonitorValue('tempValue', temperature > 0 ? `${Math.round(temperature)}°C` : 'N/A');
+    updateMonitorValue('netValue', `↓ ${formatSpeed(networkDown)}  ↑ ${formatSpeed(networkUp)}`);
+
     const cpuTempDanger = parseInt(localStorage.getItem('cpuTempDanger') || '85');
     const cpuTempWarning = parseInt(localStorage.getItem('cpuTempWarning') || '70');
     const tempValue = document.getElementById('tempValue');
-    if (data.temperature > cpuTempDanger) {
+    if (temperature > cpuTempDanger) {
         tempValue.classList.add('danger');
         tempValue.classList.remove('warning');
-    } else if (data.temperature > cpuTempWarning) {
+    } else if (temperature > cpuTempWarning) {
         tempValue.classList.add('warning');
         tempValue.classList.remove('danger');
     } else {
         tempValue.classList.remove('warning', 'danger');
     }
-    drawChart('cpuChart', monitorData.cpu, '#0a84ff');
-    drawChart('memChart', monitorData.memory, '#30d158');
-    drawChart('tempChart', monitorData.temperature, '#ff9f0a', 0, 100);
+    drawAllMonitorCharts();
+}
+
+function drawAllMonitorCharts() {
+    drawChart('cpuChart', monitorData.cpu, { color: '#0a84ff', unit: '%', minY: 0, maxY: 100 });
+    drawChart('memChart', monitorData.memory, { color: '#30d158', unit: '%', minY: 0, maxY: 100 });
+    drawChart('tempChart', monitorData.temperature, { color: '#ff9f0a', unit: '°C', minY: 0, maxY: 100 });
     drawNetworkChart();
 }
-function drawChart(canvasId, data, color, minY = 0, maxY = 100) {
+
+function formatChartValue(value, unit, decimals = 0) {
+    return `${Number(value).toFixed(decimals)}${unit}`;
+}
+
+function drawChartLabel(ctx, text, x, y, color, bounds, placement = 'above') {
+    ctx.save();
+    ctx.font = '600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+    const width = ctx.measureText(text).width + 16;
+    const height = 24;
+    const left = Math.min(bounds.right - width, Math.max(bounds.left, x - width / 2));
+    const preferredTop = placement === 'below' ? y + 10 : y - height - 12;
+    const top = Math.min(bounds.bottom - height, Math.max(bounds.top, preferredTop));
+    ctx.fillStyle = 'rgba(20, 20, 24, 0.9)';
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(left, top, width, height, 6);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = color;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, left + width / 2, top + height / 2);
+    ctx.restore();
+}
+
+function getChartPoints(data, animation, plot, minY, maxY) {
+    const values = data.map(value => Number(value)).filter(Number.isFinite);
+    if (values.length === 0) return [];
+    const animatedValue = getAnimatedValue(animation);
+    if (Number.isFinite(animatedValue)) values[values.length - 1] = animatedValue;
+    const xStep = (plot.right - plot.left) / (MAX_DATA_POINTS - 1);
+    const yRange = Math.max(1, maxY - minY);
+    return values.map((value, index) => ({
+        x: plot.right - (values.length - 1 - index) * xStep,
+        y: plot.bottom - ((Math.min(maxY, Math.max(minY, value)) - minY) / yRange) * (plot.bottom - plot.top),
+        value
+    }));
+}
+
+function traceSmoothLine(ctx, points, continuePath = false) {
+    points.forEach((point, index) => {
+        if (index === 0) {
+            if (!continuePath) ctx.moveTo(point.x, point.y);
+            return;
+        }
+        const previous = points[index - 1];
+        const middleX = (previous.x + point.x) / 2;
+        ctx.bezierCurveTo(middleX, previous.y, middleX, point.y, point.x, point.y);
+    });
+}
+
+function scheduleChartFrame(canvasId, draw) {
+    const animation = chartAnimations[canvasId];
+    if (!animation || getAnimatedValue(animation) === animation.to) return;
+    if (animation.frameId) cancelAnimationFrame(animation.frameId);
+    animation.frameId = requestAnimationFrame(() => {
+        animation.frameId = null;
+        draw();
+    });
+}
+
+function drawChart(canvasId, data, options) {
     const canvas = document.getElementById(canvasId);
     if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    const rect = canvas.getBoundingClientRect();
-    const width = rect.width;
-    const height = rect.height;
-    const padding = 40;
-    const rightPadding = 20;
-    // 初始化动画状态
-    if (!chartAnimations[canvasId]) {
-        chartAnimations[canvasId] = {
-            progress: 0,
-            targetProgress: 1,
-            lastTime: Date.now(),
-            isNewData: false
-        };
-    }
+    const { color, unit, minY, maxY } = options;
+    const { ctx, width, height } = prepareChartCanvas(canvas);
+    const plot = { left: 62, right: width - 24, top: 30, bottom: height - 30 };
     ctx.clearRect(0, 0, width, height);
-    // 绘制网格线和Y轴标签
-    ctx.font = '11px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+    ctx.font = '12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+    ctx.fillStyle = 'rgba(235, 235, 245, 0.56)';
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
     for (let i = 0; i <= 4; i++) {
-        const y = padding + (height - padding - 20) * (i / 4);
+        const y = plot.top + (plot.bottom - plot.top) * (i / 4);
         const value = Math.round(maxY - (maxY - minY) * (i / 4));
-        // 网格线
-        ctx.strokeStyle = i === 0 || i === 4 ? 'rgba(255, 255, 255, 0.1)' : 'rgba(255, 255, 255, 0.05)';
+        ctx.strokeStyle = i === 0 || i === 4 ? 'rgba(255, 255, 255, 0.13)' : 'rgba(255, 255, 255, 0.07)';
         ctx.lineWidth = 1;
         ctx.beginPath();
-        ctx.moveTo(padding, y);
-        ctx.lineTo(width - rightPadding, y);
+        ctx.moveTo(plot.left, y);
+        ctx.lineTo(plot.right, y);
         ctx.stroke();
-        // Y轴标签
-        ctx.fillText(value, padding - 8, y);
+        ctx.fillText(formatChartValue(value, unit), plot.left - 10, y);
     }
-    if (data.length > 0) {
-        const xStep = (width - padding - rightPadding) / (MAX_DATA_POINTS - 1);
-        const yRange = maxY - minY;
-        // 计算点的坐标
-        const points = data.map((value, index) => ({
-            x: padding + (data.length - 1 - index + MAX_DATA_POINTS - data.length) * xStep,
-            y: height - 20 - ((value - minY) / yRange) * (height - padding - 20),
-            value: value
-        }));
-        // 更新动画进度
-        const anim = chartAnimations[canvasId];
-        const now = Date.now();
-        const deltaTime = now - anim.lastTime;
-        anim.lastTime = now;
-        // 平滑动画过渡 (使用缓动函数)
-        if (anim.progress < anim.targetProgress) {
-            anim.progress = Math.min(anim.progress + deltaTime / 600, anim.targetProgress);
-            requestAnimationFrame(() => drawChart(canvasId, data, color, minY, maxY));
-        }
-        // 计算当前应该显示多少个点
-        const visiblePointCount = Math.ceil(points.length * anim.progress);
-        const visiblePoints = points.slice(0, visiblePointCount);
-        if (visiblePoints.length > 0) {
-            // 绘制渐变填充区域
-            ctx.beginPath();
-            ctx.moveTo(visiblePoints[0].x, height - 20);
-            // 使用平滑曲线
-            visiblePoints.forEach((point, index) => {
-                if (index === 0) {
-                    ctx.lineTo(point.x, point.y);
-                } else {
-                    const prevPoint = visiblePoints[index - 1];
-                    const cpX = (prevPoint.x + point.x) / 2;
-                    ctx.quadraticCurveTo(prevPoint.x, prevPoint.y, cpX, (prevPoint.y + point.y) / 2);
-                    if (index === visiblePoints.length - 1) {
-                        ctx.quadraticCurveTo(cpX, (prevPoint.y + point.y) / 2, point.x, point.y);
-                    }
-                }
-            });
-            ctx.lineTo(visiblePoints[visiblePoints.length - 1].x, height - 20);
-            ctx.closePath();
-            // 渐变填充 (带透明度动画)
-            const gradient = ctx.createLinearGradient(0, padding, 0, height - 20);
-            const alpha = Math.min(anim.progress * 1.2, 1);
-            gradient.addColorStop(0, color + Math.floor(0x60 * alpha).toString(16).padStart(2, '0'));
-            gradient.addColorStop(0.5, color + Math.floor(0x30 * alpha).toString(16).padStart(2, '0'));
-            gradient.addColorStop(1, color + Math.floor(0x05 * alpha).toString(16).padStart(2, '0'));
-            ctx.fillStyle = gradient;
-            ctx.fill();
-            // 绘制边框线
-            ctx.beginPath();
-            visiblePoints.forEach((point, index) => {
-                if (index === 0) {
-                    ctx.moveTo(point.x, point.y);
-                } else {
-                    const prevPoint = visiblePoints[index - 1];
-                    const cpX = (prevPoint.x + point.x) / 2;
-                    ctx.quadraticCurveTo(prevPoint.x, prevPoint.y, cpX, (prevPoint.y + point.y) / 2);
-                    if (index === visiblePoints.length - 1) {
-                        ctx.quadraticCurveTo(cpX, (prevPoint.y + point.y) / 2, point.x, point.y);
-                    }
-                }
-            });
-            ctx.strokeStyle = color;
-            ctx.lineWidth = 3;
-            ctx.lineCap = 'round';
-            ctx.lineJoin = 'round';
-            ctx.shadowColor = color;
-            ctx.shadowBlur = 8 * alpha;
-            ctx.stroke();
-            ctx.shadowBlur = 0;
-            // 绘制数据点 (带缩放动画)
-            const recentPoints = visiblePoints.slice(-1); // 只显示1个点
-            recentPoints.forEach((point, index) => {
-                const isLatest = index === recentPoints.length - 1;
-                const pointSize = isLatest ? 6 : 4;
-                // 计算点的动画进度 (从老到新依次出现)
-                const pointIndex = visiblePoints.length - recentPoints.length + index;
-                const pointProgress = Math.max(0, Math.min(1, (anim.progress * visiblePoints.length - pointIndex) * 2));
-                const scale = pointProgress;
-                const opacity = pointProgress;
-                if (opacity > 0) {
-                    ctx.save();
-                    ctx.globalAlpha = opacity;
-                    // 外圈光晕
-                    ctx.beginPath();
-                    ctx.arc(point.x, point.y, (pointSize + 3) * scale, 0, Math.PI * 2);
-                    ctx.fillStyle = color + '30';
-                    ctx.fill();
-                    // 点本身
-                    ctx.beginPath();
-                    ctx.arc(point.x, point.y, pointSize * scale, 0, Math.PI * 2);
-                    ctx.fillStyle = color;
-                    ctx.fill();
-                    // 内部高光
-                    ctx.beginPath();
-                    ctx.arc(point.x - 1, point.y - 1, (pointSize / 2) * scale, 0, Math.PI * 2);
-                    ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
-                    ctx.fill();
-                    // 最新数据点显示数值 (淡入效果)
-                    if (isLatest && opacity > 0.5) {
-                        ctx.font = 'bold 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-                        ctx.fillStyle = color;
-                        ctx.textAlign = 'center';
-                        ctx.textBaseline = 'bottom';
-                        ctx.fillText(Math.round(point.value), point.x, point.y - 12);
-                    }
-                    ctx.restore();
-                }
-            });
-        }
+    const points = getChartPoints(data, chartAnimations[canvasId], plot, minY, maxY);
+    if (points.length > 0) {
+        const gradient = ctx.createLinearGradient(0, plot.top, 0, plot.bottom);
+        gradient.addColorStop(0, `${color}52`);
+        gradient.addColorStop(1, `${color}05`);
+        ctx.beginPath();
+        ctx.moveTo(points[0].x, plot.bottom);
+        ctx.lineTo(points[0].x, points[0].y);
+        traceSmoothLine(ctx, points, true);
+        ctx.lineTo(points[points.length - 1].x, plot.bottom);
+        ctx.closePath();
+        ctx.fillStyle = gradient;
+        ctx.fill();
+
+        ctx.beginPath();
+        traceSmoothLine(ctx, points);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2.5;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.shadowColor = `${color}80`;
+        ctx.shadowBlur = 8;
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+
+        const latest = points[points.length - 1];
+        ctx.beginPath();
+        ctx.arc(latest.x, latest.y, 5, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
+        ctx.stroke();
+        drawChartLabel(ctx, formatChartValue(latest.value, unit), latest.x, latest.y, color, plot);
     }
-    // 绘制时间轴标签
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
-    ctx.font = '10px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+    ctx.fillStyle = 'rgba(235, 235, 245, 0.48)';
+    ctx.font = '11px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText('60s', padding, height - 5);
-    ctx.fillText('0s', width - rightPadding, height - 5);
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillText('60 秒前', plot.left, height - 8);
+    ctx.fillText('现在', plot.right, height - 8);
+    scheduleChartFrame(canvasId, () => drawChart(canvasId, data, options));
 }
+
 function drawNetworkChart() {
     const canvas = document.getElementById('netChart');
     if (!canvas) return;
-    const canvasId = 'netChart';
-    const ctx = canvas.getContext('2d');
-    const rect = canvas.getBoundingClientRect();
-    const width = rect.width;
-    const height = rect.height;
-    const padding = 40;
-    const rightPadding = 20;
-    // 初始化动画状态
-    if (!chartAnimations[canvasId]) {
-        chartAnimations[canvasId] = {
-            progress: 0,
-            targetProgress: 1,
-            lastTime: Date.now(),
-            isNewData: false
-        };
-    }
+    const { ctx, width, height } = prepareChartCanvas(canvas);
+    const plot = { left: 88, right: width - 24, top: 34, bottom: height - 30 };
     ctx.clearRect(0, 0, width, height);
-    const maxValue = Math.max(...monitorData.networkDown, ...monitorData.networkUp, 5);
-    // 绘制网格线和Y轴标签
-    ctx.font = '11px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+    const peakValue = Math.max(...monitorData.networkDown, ...monitorData.networkUp, 0);
+    const maxValue = Math.max(1024, peakValue * 1.15);
+    ctx.font = '12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+    ctx.fillStyle = 'rgba(235, 235, 245, 0.56)';
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
     for (let i = 0; i <= 4; i++) {
-        const y = padding + (height - padding - 20) * (i / 4);
+        const y = plot.top + (plot.bottom - plot.top) * (i / 4);
         const valueBytes = maxValue * (4 - i) / 4;
-        const valueText = formatSpeed(valueBytes);
-        // 网格线
-        ctx.strokeStyle = i === 0 || i === 4 ? 'rgba(255, 255, 255, 0.1)' : 'rgba(255, 255, 255, 0.05)';
+        ctx.strokeStyle = i === 0 || i === 4 ? 'rgba(255, 255, 255, 0.13)' : 'rgba(255, 255, 255, 0.07)';
         ctx.lineWidth = 1;
         ctx.beginPath();
-        ctx.moveTo(padding, y);
-        ctx.lineTo(width - rightPadding, y);
+        ctx.moveTo(plot.left, y);
+        ctx.lineTo(plot.right, y);
         ctx.stroke();
-        // Y轴标签
-        ctx.fillText(valueText, padding - 8, y);
+        ctx.fillText(formatSpeed(valueBytes), plot.left - 10, y);
     }
-    // 更新动画进度
-    const anim = chartAnimations[canvasId];
-    const now = Date.now();
-    const deltaTime = now - anim.lastTime;
-    anim.lastTime = now;
-    // 平滑动画过渡
-    if (anim.progress < anim.targetProgress) {
-        anim.progress = Math.min(anim.progress + deltaTime / 600, anim.targetProgress);
-        requestAnimationFrame(() => drawNetworkChart());
-    }
-    // 绘制下载和上传线条
-    drawSmoothLine(ctx, monitorData.networkDown, '#0a84ff', width, height, padding, rightPadding, maxValue, '↓', anim);
-    drawSmoothLine(ctx, monitorData.networkUp, '#30d158', width, height, padding, rightPadding, maxValue, '↑', anim);
-    // 绘制图例
-    ctx.font = 'bold 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+    drawSmoothLine(ctx, monitorData.networkDown, '#0a84ff', plot, maxValue, '↓', chartAnimations.netChartDown, 'above');
+    drawSmoothLine(ctx, monitorData.networkUp, '#30d158', plot, maxValue, '↑', chartAnimations.netChartUp, 'below');
+    ctx.font = '600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
     ctx.textAlign = 'left';
-    // 下载图例
     ctx.fillStyle = '#0a84ff';
-    ctx.fillText('↓ 下载', width - rightPadding - 120, 15);
-    // 上传图例
+    ctx.fillText('↓ 下载', plot.left, 18);
     ctx.fillStyle = '#30d158';
-    ctx.fillText('↑ 上传', width - rightPadding - 50, 15);
-    // 绘制时间轴标签
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
-    ctx.font = '10px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+    ctx.fillText('↑ 上传', plot.left + 72, 18);
+    ctx.fillStyle = 'rgba(235, 235, 245, 0.48)';
+    ctx.font = '11px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText('60s', padding, height - 5);
-    ctx.fillText('0s', width - rightPadding, height - 5);
+    ctx.fillText('60 秒前', plot.left, height - 8);
+    ctx.fillText('现在', plot.right, height - 8);
+    scheduleChartFrame('netChartDown', drawNetworkChart);
+    scheduleChartFrame('netChartUp', drawNetworkChart);
 }
-function drawSmoothLine(ctx, data, color, width, height, padding, rightPadding, maxValue, label, anim) {
-    if (data.length === 0) return;
-    const xStep = (width - padding - rightPadding) / (MAX_DATA_POINTS - 1);
-    // 计算点的坐标
-    const points = data.map((value, index) => ({
-        x: padding + (data.length - 1 - index + MAX_DATA_POINTS - data.length) * xStep,
-        y: height - 20 - (value / maxValue) * (height - padding - 20),
-        value: value
-    }));
-    // 计算当前应该显示多少个点
-    const visiblePointCount = Math.ceil(points.length * anim.progress);
-    const visiblePoints = points.slice(0, visiblePointCount);
-    if (visiblePoints.length === 0) return;
-    // 绘制渐变填充区域
+function drawSmoothLine(ctx, data, color, plot, maxValue, label, animation, placement) {
+    const points = getChartPoints(data, animation, plot, 0, maxValue);
+    if (points.length === 0) return;
+    const gradient = ctx.createLinearGradient(0, plot.top, 0, plot.bottom);
+    gradient.addColorStop(0, `${color}38`);
+    gradient.addColorStop(1, `${color}04`);
     ctx.beginPath();
-    ctx.moveTo(visiblePoints[0].x, height - 20);
-    // 使用平滑曲线
-    visiblePoints.forEach((point, index) => {
-        if (index === 0) {
-            ctx.lineTo(point.x, point.y);
-        } else {
-            const prevPoint = visiblePoints[index - 1];
-            const cpX = (prevPoint.x + point.x) / 2;
-            ctx.quadraticCurveTo(prevPoint.x, prevPoint.y, cpX, (prevPoint.y + point.y) / 2);
-            if (index === visiblePoints.length - 1) {
-                ctx.quadraticCurveTo(cpX, (prevPoint.y + point.y) / 2, point.x, point.y);
-            }
-        }
-    });
-    ctx.lineTo(visiblePoints[visiblePoints.length - 1].x, height - 20);
+    ctx.moveTo(points[0].x, plot.bottom);
+    ctx.lineTo(points[0].x, points[0].y);
+    traceSmoothLine(ctx, points, true);
+    ctx.lineTo(points[points.length - 1].x, plot.bottom);
     ctx.closePath();
-    // 渐变填充 (带透明度动画)
-    const alpha = Math.min(anim.progress * 1.2, 1);
-    const gradient = ctx.createLinearGradient(0, padding, 0, height - 20);
-    gradient.addColorStop(0, color + Math.floor(0x40 * alpha).toString(16).padStart(2, '0'));
-    gradient.addColorStop(0.5, color + Math.floor(0x20 * alpha).toString(16).padStart(2, '0'));
-    gradient.addColorStop(1, color + Math.floor(0x05 * alpha).toString(16).padStart(2, '0'));
     ctx.fillStyle = gradient;
     ctx.fill();
-    // 绘制边框线
     ctx.beginPath();
-    visiblePoints.forEach((point, index) => {
-        if (index === 0) {
-            ctx.moveTo(point.x, point.y);
-        } else {
-            const prevPoint = visiblePoints[index - 1];
-            const cpX = (prevPoint.x + point.x) / 2;
-            ctx.quadraticCurveTo(prevPoint.x, prevPoint.y, cpX, (prevPoint.y + point.y) / 2);
-            if (index === visiblePoints.length - 1) {
-                ctx.quadraticCurveTo(cpX, (prevPoint.y + point.y) / 2, point.x, point.y);
-            }
-        }
-    });
+    traceSmoothLine(ctx, points);
     ctx.strokeStyle = color;
-    ctx.lineWidth = 2.5;
+    ctx.lineWidth = 2.25;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
-    ctx.shadowColor = color;
-    ctx.shadowBlur = 6 * alpha;
     ctx.stroke();
-    ctx.shadowBlur = 0;
-    // 绘制最新数据点 (带缩放动画)
-    const latestPoint = visiblePoints[visiblePoints.length - 1];
-    const pointProgress = Math.max(0, Math.min(1, (anim.progress * points.length - (visiblePoints.length - 1)) * 2));
-    const scale = pointProgress;
-    const opacity = pointProgress;
-    if (opacity > 0) {
-        ctx.save();
-        ctx.globalAlpha = opacity;
-        // 外圈光晕
-        ctx.beginPath();
-        ctx.arc(latestPoint.x, latestPoint.y, 8 * scale, 0, Math.PI * 2);
-        ctx.fillStyle = color + '30';
-        ctx.fill();
-        // 点本身
-        ctx.beginPath();
-        ctx.arc(latestPoint.x, latestPoint.y, 5 * scale, 0, Math.PI * 2);
-        ctx.fillStyle = color;
-        ctx.fill();
-        // 内部高光
-        ctx.beginPath();
-        ctx.arc(latestPoint.x - 1, latestPoint.y - 1, 2.5 * scale, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
-        ctx.fill();
-        // 显示最新数值 (淡入效果)
-        if (opacity > 0.5) {
-            ctx.font = 'bold 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-            ctx.fillStyle = color;
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'bottom';
-            ctx.fillText(`${label} ${latestPoint.value.toFixed(1)}`, latestPoint.x, latestPoint.y - 10);
-        }
-        ctx.restore();
-    }
+    const latest = points[points.length - 1];
+    ctx.beginPath();
+    ctx.arc(latest.x, latest.y, 4.5, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
+    ctx.stroke();
+    drawChartLabel(ctx, `${label} ${formatSpeed(latest.value)}`, latest.x, latest.y, color, plot, placement);
 }
 // ========== Dock应用管理 ==========
 let applications = []; // Dock 中的应用（用户添加的）
@@ -7078,16 +7316,20 @@ function initSettings() {
 
     initAudioRouteSettings();
     initRk628ScaleModeSetting();
+    initStatusLedSetting();
 }
 // ========== WiFi管理 ==========
 let wifiNetworks = [];  // 扫描到的 WiFi 网络列表
+let wifiActiveScanNetworks = null;
 let wifiStatus = {
     mode: 0,  // 0=Disabled, 1=STA, 2=AP
     on: false,
     connected: false,
+    connecting: false,
     ssid: null,
     ip: null,
     mac: null,
+    rssi: null,
     scanning: false
 };
 
@@ -7099,26 +7341,248 @@ function isWifiSettingsActive() {
 
 function updateWifiStatusBar() {
     const el = document.getElementById('wifiStatus');
-    if (!el) return;
+    const icon = document.getElementById('wifiStatusIcon');
+    if (!el || !icon) return;
     if (wifiStatus.connected && wifiStatus.ssid) {
         el.textContent = wifiStatus.ssid;
+        const scannedRssi = wifiNetworks.find(network => network.ssid === wifiStatus.ssid)?.rssi;
+        const signal = window.UIComponents.getWifiSignalMeta(wifiStatus.rssi ?? scannedRssi);
+        icon.dataset.level = String(signal.level);
+        icon.classList.add('connected');
+        icon.title = signal.rssi === null ? 'Wi-Fi 已连接，信号未知' : `Wi-Fi 信号${signal.label} · ${signal.rssi} dBm`;
+        icon.setAttribute('aria-label', icon.title);
+        return;
+    }
+    if (wifiStatus.connecting) {
+        const waitingForScan = wifiConnectOperation?.phase === 'waitingScan';
+        el.textContent = wifiConnectOperation?.ssid
+            ? `${waitingForScan ? '等待扫描后连接' : '正在连接'} ${wifiConnectOperation.ssid}`
+            : waitingForScan ? '等待扫描后连接' : '正在连接';
+        icon.dataset.level = '0';
+        icon.classList.remove('connected');
+        icon.title = 'Wi-Fi 正在连接';
+        icon.setAttribute('aria-label', icon.title);
         return;
     }
     el.textContent = '未连接';
+    icon.dataset.level = '0';
+    icon.classList.remove('connected');
+    icon.title = 'Wi-Fi 未连接';
+    icon.setAttribute('aria-label', icon.title);
 }
-let wifiAutoScanInterval = null;  // 自动扫描定时器
-const WIFI_AUTO_SCAN_INTERVAL = 15000;  // 15秒自动扫描一次
+
+function normalizeWifiRssi(value) {
+    const rssi = Number(value);
+    return Number.isFinite(rssi) && rssi < 0 ? rssi : null;
+}
+let wifiAutoScanTimer = null;
+let wifiScanSessionStopTimer = null;
+let wifiScanSessionDeadline = 0;
+let wifiScanSessionExpired = false;
+let wifiScanSessionNeedsImmediateScan = false;
+let wifiBusyRecoveryTimer = null;
+const WIFI_SCAN_DISCONNECTED_INTERVAL_MS = 5000;
+const WIFI_SCAN_CONNECTED_INTERVAL_MS = 5000;
+const WIFI_SCAN_BUSY_RETRY_MS = 1000;
+const WIFI_SCAN_SESSION_MAX_MS = 180000;
+const WIFI_SCAN_QUEUE_TIMEOUT_MS = 35000;
+const WIFI_CONNECT_TIMEOUT_MS = 35000;
+const WIFI_NETWORK_STALE_MS = 30000;
+const WIFI_SCAN_REQUEST_DURATION_S = 10;
+let wifiConnectOperation = null;
+let wifiConnectSequence = 0;
+let wifiSavedSsids = new Set();
+let wifiConnectionFailure = null;
+let wifiStatusRefreshTimer = null;
+let wifiStatusRefreshDeadline = 0;
+
+function formatWifiConnectionFailure(reason) {
+    const labels = {
+        'SSID not found': '未找到网络',
+        'Association failed': '认证或密码错误',
+        'Association timeout': '信号弱或认证超时',
+        'DHCP timeout': '获取 IP 地址超时',
+        'Connection timeout': '连接超时'
+    };
+    return labels[reason] || reason || '连接失败';
+}
+const wifiOrderMap = new Map();
+let wifiOrderCounter = 0;
+
+function ensureWifiOrder(ssid) {
+    if (!wifiOrderMap.has(ssid)) {
+        wifiOrderMap.set(ssid, wifiOrderCounter++);
+    }
+    return wifiOrderMap.get(ssid);
+}
+
+function compareWifiNetworks(a, b) {
+    const aConnected = wifiStatus.connected && a?.ssid === wifiStatus.ssid;
+    const bConnected = wifiStatus.connected && b?.ssid === wifiStatus.ssid;
+    if (aConnected !== bConnected) return aConnected ? -1 : 1;
+    const aRssi = normalizeWifiRssi(a?.rssi);
+    const bRssi = normalizeWifiRssi(b?.rssi);
+    if (aRssi !== null || bRssi !== null) {
+        if (aRssi === null) return 1;
+        if (bRssi === null) return -1;
+        if (aRssi !== bRssi) return bRssi - aRssi;
+    }
+    return ensureWifiOrder(a.ssid) - ensureWifiOrder(b.ssid);
+}
+
+function stopWifiStatusRefresh() {
+    if (wifiStatusRefreshTimer) {
+        clearTimeout(wifiStatusRefreshTimer);
+        wifiStatusRefreshTimer = null;
+    }
+    wifiStatusRefreshDeadline = 0;
+}
+
+function scheduleWifiStatusRefresh(delayMs = 0, durationMs = 20000) {
+    if (!isWifiSettingsActive()) return;
+    if (!wifiStatusRefreshDeadline || durationMs > 0) {
+        wifiStatusRefreshDeadline = Date.now() + durationMs;
+    }
+    if (wifiStatusRefreshTimer) clearTimeout(wifiStatusRefreshTimer);
+    wifiStatusRefreshTimer = setTimeout(() => {
+        wifiStatusRefreshTimer = null;
+        if (!isWifiSettingsActive() || !wifiStatus.on) {
+            stopWifiStatusRefresh();
+            return;
+        }
+        sendMessage('wifi', 'getStatus', {}, (response) => {
+            if (response.code === 0 && response.data) {
+                applyWifiStatusSnapshot(response.data, { preserveConnecting: true });
+                updateWifiStatusBar();
+                renderWifiList();
+                if (wifiStatus.connected) {
+                    stopWifiStatusRefresh();
+                    startWifiAutoScan(0);
+                    return;
+                }
+            }
+            if (Date.now() < wifiStatusRefreshDeadline) {
+                scheduleWifiStatusRefresh(1000, 0);
+            } else {
+                stopWifiStatusRefresh();
+            }
+        });
+    }, Math.max(0, delayMs));
+}
+
+function syncWifiSavedSsids(data) {
+    const stored = Array.isArray(data?.storedSsids)
+        ? data.storedSsids
+        : data?.storedSsid ? [data.storedSsid] : [];
+    wifiSavedSsids = new Set(
+        stored.filter(ssid => typeof ssid === 'string' && ssid.length > 0)
+    );
+}
+
+function createWifiNetworkFromScan(data) {
+    if (!data || typeof data.ssid !== 'string' || data.ssid.length === 0) return null;
+    return {
+        ssid: data.ssid,
+        bssid: data.bssid || null,
+        rssi: normalizeWifiRssi(data.rssi),
+        security: getSecurityName(data.security),
+        channel: data.channel ?? null,
+        lastSeenAt: Date.now()
+    };
+}
+
+function upsertWifiNetwork(network) {
+    if (!network || typeof network.ssid !== 'string' || network.ssid.length === 0) return false;
+    const index = wifiNetworks.findIndex(item => item.ssid === network.ssid);
+    if (index < 0) {
+        wifiNetworks.push(network);
+        return true;
+    }
+    const existing = wifiNetworks[index];
+    wifiNetworks[index] = {
+        ...existing,
+        ...network,
+        bssid: network.bssid || existing.bssid || null,
+        rssi: network.rssi ?? existing.rssi ?? null,
+        security: network.security || existing.security,
+        channel: network.channel ?? existing.channel ?? null,
+        lastSeenAt: network.lastSeenAt || Date.now()
+    };
+    return true;
+}
+
+function ensureConnectedWifiVisible() {
+    if (!wifiStatus.connected || !wifiStatus.ssid) return false;
+    return upsertWifiNetwork({
+        ssid: wifiStatus.ssid,
+        bssid: null,
+        rssi: wifiStatus.rssi,
+        security: wifiNetworks.find(network => network.ssid === wifiStatus.ssid)?.security || 'unknown',
+        channel: null,
+        lastSeenAt: Date.now()
+    });
+}
+
+function markWifiNetworkUnavailable(ssid) {
+    if (!ssid) return false;
+    const network = wifiNetworks.find(item => item.ssid === ssid);
+    if (!network) return false;
+    network.rssi = null;
+    network.channel = null;
+    network.lastSeenAt = Date.now() - WIFI_NETWORK_STALE_MS - 1;
+    return true;
+}
+
+function pruneStaleWifiNetworks() {
+    const now = Date.now();
+    wifiNetworks = wifiNetworks.filter(network => {
+        if (wifiStatus.connected && network.ssid === wifiStatus.ssid) return true;
+        const isFresh = !network.lastSeenAt || now - network.lastSeenAt <= WIFI_NETWORK_STALE_MS;
+        if (isFresh) return true;
+        if (wifiSavedSsids.has(network.ssid)) {
+            network.rssi = null;
+            network.channel = null;
+            return true;
+        }
+        return false;
+    });
+}
+
+function applyWifiStatusSnapshot(data, { preserveConnecting = false } = {}) {
+    if (!data) return false;
+    const previousSsid = wifiStatus.ssid;
+    const wasConnected = wifiStatus.connected;
+    const wifiEnabled = data.enabled === undefined ? !!data.on : !!data.enabled;
+    const ssid = typeof data.ssid === 'string' && data.ssid.length > 0 ? data.ssid : null;
+    const hasIp = typeof data.ip === 'string' && data.ip.length > 0;
+    const connected = !!data.connected || (wifiEnabled && !!ssid && !data.connecting && (data.mode === 1 || hasIp));
+    wifiStatus.mode = data.mode || 0;
+    wifiStatus.on = wifiEnabled || !!data.on || connected;
+    wifiStatus.connected = connected;
+    wifiStatus.connecting = preserveConnecting
+        ? (!!data.connecting || !!wifiConnectOperation || (wifiStatus.on && !wifiStatus.connected))
+        : (!!data.connecting || !!wifiConnectOperation);
+    wifiStatus.scanning = !!data.scanning;
+    syncWifiSavedSsids(data);
+    wifiStatus.ssid = ssid;
+    wifiStatus.ip = data.ip || null;
+    wifiStatus.mac = data.mac || wifiStatus.mac || null;
+    wifiStatus.rssi = normalizeWifiRssi(data.rssi);
+    if (wasConnected && !wifiStatus.connected) {
+        markWifiNetworkUnavailable(previousSsid || ssid);
+    }
+    ensureConnectedWifiVisible();
+    return true;
+}
 // 初始化WiFi状态
 function initWifiStatus() {
+    if (isWifiSettingsActive() && !wifiScanSessionDeadline && !wifiScanSessionExpired) {
+        beginWifiScanSession();
+    }
     sendMessage('wifi', 'getStatus', {}, (response) => {
         if (response.code === 0 && response.data) {
             const data = response.data;
-            wifiStatus.mode = data.mode || 0;
-            wifiStatus.on = !!data.on;
-            wifiStatus.connected = data.connected || false;
-            wifiStatus.ssid = data.ssid || null;
-            wifiStatus.ip = data.ip || null;
-            wifiStatus.mac = data.mac || null;
+            applyWifiStatusSnapshot(data);
 
             updateWifiStatusBar();
 
@@ -7131,43 +7595,34 @@ function initWifiStatus() {
             }
             // 更新UI
             const wifiSwitchInput = document.getElementById('wifiSwitchInput');
-            const wifiNetworkName = document.getElementById('wifiNetworkName');
             const wifiNetworksContainer = document.getElementById('wifiNetworksContainer');
-            const wifiOn = !!data.on;
-            if (wifiOn) {
+            const wifiEnabled = data.enabled === undefined ? !!data.on : !!data.enabled;
+            if (wifiEnabled) {
                 // WiFi已开启（不强制要求一定在 STA_MODE）
                 wifiSwitchInput.checked = true;
-                wifiNetworkName.style.display = 'flex';
                 wifiNetworksContainer.style.display = 'block';
                 // 更新网络名称
-                updateCurrentWifiName();
-                // 自动扫描仅在 WiFi 页面可见时开启
+                updateWifiStatusBar();
+                // WiFi 页面内持续扫描；连接事务执行时会短暂让出射频。
                 if (isWifiSettingsActive()) {
-                    startWifiAutoScan();
-                    scanWifiSilent();
+                    const initialDelay = wifiScanSessionNeedsImmediateScan ? 0 : undefined;
+                    wifiScanSessionNeedsImmediateScan = false;
+                    startWifiAutoScan(initialDelay);
                 }
             } else {
                 wifiSwitchInput.checked = false;
-                wifiNetworkName.style.display = 'none';
                 wifiNetworksContainer.style.display = 'none';
             }
             console.log('[WiFi] 状态初始化完成:', wifiStatus);
 
             // 同步首页状态栏显示
             updateWifiStatusBar();
+            renderWifiList();
         } else {
             // 串口未就绪/设备未响应时保持 UI 不变，等待后续 serial:opened / system:status 再刷新
             console.warn('[WiFi] 状态初始化失败:', response);
         }
     });
-}
-// RSSI 转信号强度图标
-function getRssiSignal(rssi) {
-    if (rssi >= -50) return '▂▃▅▆█';  // 5格
-    if (rssi >= -60) return '▂▃▅▆▇';  // 4格
-    if (rssi >= -70) return '▂▃▅';    // 3格
-    if (rssi >= -80) return '▂▃';     // 2格
-    return '▂';                        // 1格
 }
 // 安全类型映射
 function getSecurityIcon(security) {
@@ -7181,16 +7636,28 @@ function toggleWifiSwitch() {
 }
 // 处理WiFi开关状态变化
 function handleWifiSwitchChange(isOn) {
-    const wifiNetworkName = document.getElementById('wifiNetworkName');
     const wifiNetworksContainer = document.getElementById('wifiNetworksContainer');
     if (isOn) {
+        if (isWifiSettingsActive() && !wifiScanSessionDeadline) {
+            beginWifiScanSession();
+        }
+        wifiScanSessionNeedsImmediateScan = true;
+        wifiStatus.mode = 1;
+        wifiStatus.on = true;
+        wifiStatus.connected = false;
+        wifiStatus.connecting = true;
+        wifiStatus.scanning = false;
+        wifiNetworksContainer.style.display = 'block';
+        updateWifiStatusBar();
+        renderWifiList();
+        scheduleWifiStatusRefresh(0, 20000);
         // 开启WiFi：优先尝试 STA 自动连接（不带 SSID，依赖下位机已保存网络）
         // 如果下位机返回“需要 SSID/无已保存网络”，再退回 MONITOR 扫描模式。
         sendMessage('wifi', 'getStatus', {}, (statusResponse) => {
             if (statusResponse.code === 0 && statusResponse.data) {
                 const currentMode = statusResponse.data.mode || 0;
                 if (currentMode === 1 || currentMode === 3) {
-                    enableWifiUI();
+                    initWifiStatus();
                     return;
                 }
             }
@@ -7202,13 +7669,17 @@ function handleWifiSwitchChange(isOn) {
             if (response.code === 0) {
                 wifiStatus.mode = 0;
                 wifiStatus.connected = false;
-                wifiNetworkName.style.display = 'none';
+                wifiStatus.connecting = false;
+                clearWifiConnectionOperation();
+                stopWifiStatusRefresh();
+                wifiStatus.ssid = null;
+                wifiStatus.rssi = null;
+                updateWifiStatusBar();
                 wifiNetworksContainer.style.display = 'none';
                 // 停止自动扫描
                 stopWifiAutoScan();
-                // 清空网络列表
-                wifiNetworks = [];
-                document.getElementById('wifiList').innerHTML = '';
+                // 保留短 TTL 扫描缓存，重新打开 WiFi 时先显示最近发现，再由新扫描刷新。
+                renderWifiList();
                 showToast('WiFi 已关闭');
             } else {
                 // 失败则恢复开关状态
@@ -7237,9 +7708,13 @@ function switchToStaMode() {
     sendMessage('wifi', 'setMode', { mode: 1 }, (response) => {
         if (response.code === 0) {
             wifiStatus.mode = 1;
-            enableWifiUI();
+            initWifiStatus();
             showToast('WiFi 已开启（连接模式）');
         } else {
+            if (isWifiOwnerFault(response)) {
+                showWifiOwnerFault(response);
+                return;
+            }
             // 失败则恢复开关状态
             document.getElementById('wifiSwitchInput').checked = false;
             showToast(`WiFi 开启失败: ${formatDeviceCommandError(response)}`);
@@ -7258,6 +7733,10 @@ function switchToMonitorMode() {
                 scanWifi();
             }, 1000);  // 延迟1秒确保模式切换完成
         } else {
+            if (isWifiOwnerFault(response)) {
+                showWifiOwnerFault(response);
+                return;
+            }
             // 失败则恢复开关状态
             document.getElementById('wifiSwitchInput').checked = false;
             showToast(`WiFi 开启失败: ${formatDeviceCommandError(response)}`);
@@ -7266,126 +7745,354 @@ function switchToMonitorMode() {
 }
 // 启用WiFi UI
 function enableWifiUI() {
-    const wifiNetworkName = document.getElementById('wifiNetworkName');
     const wifiNetworksContainer = document.getElementById('wifiNetworksContainer');
-    wifiStatus.mode = 1;
-    wifiNetworkName.style.display = 'flex';
     wifiNetworksContainer.style.display = 'block';
     wifiStatus.on = true;
-    // 仅在 WiFi 页面可见时启用扫描
     if (isWifiSettingsActive()) {
-        scanWifiSilent();
-        startWifiAutoScan();
+        startWifiAutoScan(0);
     }
 }
-// 启动WiFi自动扫描
-function startWifiAutoScan() {
-    if (!isWifiSettingsActive()) {
+
+function pauseWifiAutoScan() {
+    if (wifiAutoScanTimer) {
+        clearTimeout(wifiAutoScanTimer);
+        wifiAutoScanTimer = null;
+    }
+}
+
+function beginWifiScanSession() {
+    stopWifiAutoScan();
+    wifiScanSessionDeadline = Date.now() + WIFI_SCAN_SESSION_MAX_MS;
+    wifiScanSessionExpired = false;
+    wifiScanSessionNeedsImmediateScan = true;
+    wifiScanSessionStopTimer = setTimeout(() => {
+        pauseWifiAutoScan();
+        if (wifiBusyRecoveryTimer) {
+            clearTimeout(wifiBusyRecoveryTimer);
+            wifiBusyRecoveryTimer = null;
+        }
+        wifiScanSessionDeadline = 0;
+        wifiScanSessionExpired = true;
+        wifiScanSessionStopTimer = null;
+    }, WIFI_SCAN_SESSION_MAX_MS);
+}
+
+function startWifiAutoScan(delayMs = undefined) {
+    if (!isWifiSettingsActive() || !wifiScanSessionDeadline ||
+        Date.now() >= wifiScanSessionDeadline) {
+        pauseWifiAutoScan();
         return;
     }
-    stopWifiAutoScan(); // 先停止已有的定时器
-    wifiAutoScanInterval = setInterval(() => {
-        if (isWifiSettingsActive() && wifiStatus.on && !wifiStatus.scanning) {
-            scanWifiSilent();
+    pauseWifiAutoScan();
+    const interval = delayMs ?? (wifiStatus.connected
+        ? WIFI_SCAN_CONNECTED_INTERVAL_MS
+        : WIFI_SCAN_DISCONNECTED_INTERVAL_MS);
+    const remaining = wifiScanSessionDeadline - Date.now();
+    wifiAutoScanTimer = setTimeout(() => {
+        wifiAutoScanTimer = null;
+        if (!isWifiSettingsActive() || !wifiStatus.on ||
+            Date.now() >= wifiScanSessionDeadline) return;
+        if (wifiStatus.connecting || wifiStatus.scanning || wifiConnectOperation) {
+            startWifiAutoScan(WIFI_SCAN_BUSY_RETRY_MS);
+            return;
         }
-    }, WIFI_AUTO_SCAN_INTERVAL);
+        scanWifiSilent();
+    }, Math.max(0, Math.min(interval, remaining)));
 }
 // 停止WiFi自动扫描
 function stopWifiAutoScan() {
-    if (wifiAutoScanInterval) {
-        clearInterval(wifiAutoScanInterval);
-        wifiAutoScanInterval = null;
+    pauseWifiAutoScan();
+    if (wifiScanSessionStopTimer) {
+        clearTimeout(wifiScanSessionStopTimer);
+        wifiScanSessionStopTimer = null;
     }
+    if (wifiBusyRecoveryTimer) {
+        clearTimeout(wifiBusyRecoveryTimer);
+        wifiBusyRecoveryTimer = null;
+    }
+    wifiScanSessionDeadline = 0;
+    wifiScanSessionExpired = false;
+    wifiScanSessionNeedsImmediateScan = false;
 }
 function stopWifiDeviceScan() {
-    if (!wifiStatus.scanning) {
-        return;
-    }
-    sendMessage('wifi', 'stopScan', {}, (response) => {
-        if (response.code === 0) {
-            wifiStatus.scanning = false;
-        } else {
-            console.warn('[WiFi] 停止扫描失败:', response.msg);
-        }
-    });
+    // 驱动没有取消扫描接口；离开页面只停止后续扫描，当前扫描由完成事件收尾。
 }
+
+function recoverWifiScanBusy() {
+    pauseWifiAutoScan();
+    if (wifiBusyRecoveryTimer) clearTimeout(wifiBusyRecoveryTimer);
+    wifiBusyRecoveryTimer = setTimeout(() => {
+        wifiBusyRecoveryTimer = null;
+        if (!isWifiSettingsActive()) return;
+        if (wifiConnectOperation) {
+            sendMessage('wifi', 'getStatus', {}, (response) => {
+                if (response.code !== 0 || !response.data) return;
+                const data = response.data;
+                wifiStatus.connected = !!data.connected;
+                wifiStatus.connecting = !!data.connecting;
+                wifiStatus.scanning = !!data.scanning;
+                if (wifiStatus.connected && data.ssid === wifiConnectOperation.ssid) {
+                    wifiStatus.ssid = data.ssid;
+                    finishWifiConnection(data.ssid);
+                    startWifiAutoScan();
+                } else if (!wifiStatus.connecting && !wifiStatus.scanning) {
+                    startPendingWifiConnection();
+                } else {
+                    recoverWifiScanBusy();
+                }
+            });
+            return;
+        }
+        initWifiStatus();
+    }, WIFI_SCAN_BUSY_RETRY_MS);
+}
+
 // 静默扫描WiFi（不显示加载状态）
 function scanWifiSilent() {
     // WiFi 未开启时不扫描
-    if (!wifiStatus.on) {
+    if (!wifiStatus.on || wifiStatus.connecting || wifiStatus.scanning) {
         return;
     }
     // 仅在 WiFi 页面可见时扫描
     if (!isWifiSettingsActive()) {
         return;
     }
+    if (wifiNetworks.length === 0) {
+        renderDeviceListState(
+            document.getElementById('wifiList'),
+            '正在扫描 WiFi 网络...'
+        );
+    }
+    wifiActiveScanNetworks = new Set();
     wifiStatus.scanning = true;
     // 发送开始扫描命令到下位机
-    sendMessage('wifi', 'startScan', { duration: 20 }, (response) => {
+    sendMessage('wifi', 'startScan', { duration: WIFI_SCAN_REQUEST_DURATION_S }, (response) => {
         if (response.code !== 0) {
             console.warn('[WiFi] 扫描失败:', response.msg);
             wifiStatus.scanning = false;
+            wifiActiveScanNetworks = null;
+            if (response.code === 6) {
+                recoverWifiScanBusy();
+                return;
+            }
+            renderDeviceListState(
+                document.getElementById('wifiList'),
+                `WiFi 扫描失败：${formatDeviceCommandError(response, '请重试')}`
+            );
+            startPendingWifiConnection();
+            startWifiAutoScan();
         }
         // 扫描结果会通过事件推送
     });
 }
 function scanWifi() {
     const wifiList = document.getElementById('wifiList');
-    // 清空现有列表
-    wifiNetworks = [];
-    wifiList.innerHTML = '<div style="text-align: center; padding: 20px; color: var(--text-secondary);">正在扫描 WiFi 网络...</div>';
+    if (wifiNetworks.length === 0) {
+        renderDeviceListState(wifiList, '正在扫描 WiFi 网络...');
+    }
     scanWifiSilent();
 }
+
+function renderDeviceListState(list, message) {
+    if (!list) return;
+    const state = document.createElement('div');
+    state.className = 'device-list-empty';
+    state.textContent = message;
+    const fragment = document.createDocumentFragment();
+    fragment.appendChild(state);
+    replaceAnimatedDeviceList(list, fragment);
+}
+
+function replaceAnimatedDeviceList(list, fragment) {
+    if (!list) return;
+    const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    const previousRects = new Map();
+    const listRect = list.getBoundingClientRect();
+    const nextKeys = new Set(
+        Array.from(fragment.querySelectorAll('[data-device-key]'), item => item.dataset.deviceKey)
+    );
+    const leavingItems = [];
+    list.querySelectorAll('[data-device-key]').forEach(item => {
+        const rect = item.getBoundingClientRect();
+        previousRects.set(item.dataset.deviceKey, rect);
+        if (!reduceMotion && !nextKeys.has(item.dataset.deviceKey)) {
+            leavingItems.push({ clone: item.cloneNode(true), rect });
+        }
+    });
+
+    list.replaceChildren(fragment);
+    if (reduceMotion || typeof Element.prototype.animate !== 'function') return;
+
+    leavingItems.forEach(({ clone, rect }) => {
+        clone.removeAttribute('data-device-key');
+        clone.classList.add('device-item-leaving');
+        clone.setAttribute('aria-hidden', 'true');
+        clone.inert = true;
+        clone.style.top = `${rect.top - listRect.top}px`;
+        clone.style.left = `${rect.left - listRect.left}px`;
+        clone.style.width = `${rect.width}px`;
+        clone.style.height = `${rect.height}px`;
+        list.appendChild(clone);
+        const animation = clone.animate(
+            [
+                { opacity: 1, transform: 'scale(1)' },
+                { opacity: 0, transform: 'scale(0.985)' }
+            ],
+            { duration: 160, easing: 'cubic-bezier(0.2, 0, 0, 1)' }
+        );
+        animation.finished.finally(() => clone.remove());
+    });
+
+    list.querySelectorAll('[data-device-key]').forEach(item => {
+        const previous = previousRects.get(item.dataset.deviceKey);
+        if (!previous) {
+            item.animate(
+                [
+                    { opacity: 0, transform: 'translateY(8px)' },
+                    { opacity: 1, transform: 'translateY(0)' }
+                ],
+                { duration: 220, easing: 'cubic-bezier(0.2, 0, 0, 1)' }
+            );
+            return;
+        }
+
+        const current = item.getBoundingClientRect();
+        const offset = previous.top - current.top;
+        if (Math.abs(offset) < 1) return;
+        item.animate(
+            [
+                { transform: `translateY(${offset}px)` },
+                { transform: 'translateY(0)' }
+            ],
+            { duration: 220, easing: 'cubic-bezier(0.2, 0, 0, 1)' }
+        );
+    });
+}
+
+function reconcileDeviceList(list, orderedItems) {
+    if (!list) return;
+    const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    const previousKeys = new Set();
+    list.querySelectorAll('[data-device-key]').forEach(item => {
+        previousKeys.add(item.dataset.deviceKey);
+    });
+
+    const nextItems = new Set(orderedItems);
+    list.querySelectorAll('[data-device-key]').forEach(item => {
+        if (!nextItems.has(item)) item.remove();
+    });
+    list.querySelectorAll('.device-list-empty').forEach(item => item.remove());
+
+    orderedItems.forEach((item, index) => {
+        const current = list.children[index] || null;
+        if (current !== item) list.insertBefore(item, current);
+    });
+
+    if (reduceMotion || typeof Element.prototype.animate !== 'function') return;
+    orderedItems.forEach(item => {
+        if (previousKeys.has(item.dataset.deviceKey)) return;
+        item.animate(
+            [
+                { opacity: 0, transform: 'translateY(8px)' },
+                { opacity: 1, transform: 'translateY(0)' }
+            ],
+            { duration: 220, easing: 'cubic-bezier(0.2, 0, 0, 1)' }
+        );
+    });
+}
+
 // 渲染 WiFi 列表
 function renderWifiList() {
     const wifiList = document.getElementById('wifiList');
-    wifiList.innerHTML = '';
-    // 更新当前连接的网络名称显示
-    updateCurrentWifiName();
+    if (!wifiList) return;
+    updateWifiStatusBar();
     if (wifiNetworks.length === 0) {
-        wifiList.innerHTML = '<div style="text-align: center; padding: 20px; color: var(--text-secondary);">未发现 WiFi 网络</div>';
+        renderDeviceListState(wifiList, '未发现 WiFi 网络');
         return;
     }
-    // 按信号强度排序
-    const sortedNetworks = [...wifiNetworks].sort((a, b) => b.rssi - a.rssi);
+    const sortedNetworks = [...wifiNetworks].sort(compareWifiNetworks);
+    if (!renderWifiList._itemMap) renderWifiList._itemMap = new Map();
+    const itemMap = renderWifiList._itemMap;
+    const nextKeys = new Set();
+    const orderedItems = [];
     sortedNetworks.forEach(network => {
-        const item = document.createElement('div');
-        item.className = 'device-item';
+        const key = `wifi:${network.ssid}`;
+        nextKeys.add(key);
+        let item = itemMap.get(key);
+        if (!item) {
+            item = document.createElement('div');
+            item.className = 'device-item';
+            item.dataset.deviceKey = key;
+            itemMap.set(key, item);
+        }
         const isConnected = wifiStatus.connected && wifiStatus.ssid === network.ssid;
-        item.innerHTML = `
-            <div class="icon-md">${getSecurityIcon(network.security)}</div>
-            <div class="device-info">
-                <div class="device-name">${network.ssid}${isConnected ? ' ✓' : ''}</div>
-                <div class="text-muted">${isConnected ? '已连接' : network.security === 'open' ? '开放网络' : '需要密码'}</div>
-            </div>
-            <div class="status-icon">${getRssiSignal(network.rssi)}</div>
-            <div class="device-actions">
-                ${isConnected
-                ? `<button class="btn-base btn-sm btn-primary" onclick="showWifiDetails('${network.ssid}')">详情</button>
-                   <button class="btn-base btn-sm btn-danger" onclick="forgetWifi('${network.ssid}')">忘记</button>`
-                : `<button class="btn-base btn-sm btn-success" onclick="connectWifi('${escapeHtml(network.ssid)}', '${network.security}')">连接</button>`
-            }
-            </div>
-        `;
-        wifiList.appendChild(item);
+        const isConnecting = !!wifiConnectOperation && wifiConnectOperation.ssid === network.ssid;
+        const isWaitingForScan = isConnecting && wifiConnectOperation.phase === 'waitingScan';
+        const isSaved = wifiSavedSsids.has(network.ssid);
+        const connectionFailure = wifiConnectionFailure?.ssid === network.ssid
+            ? wifiConnectionFailure.reason
+            : null;
+        item.classList.toggle('is-connected', isConnected);
+        window.UIComponents.renderWifiListItem(item, {
+            network,
+            isConnected,
+            isConnecting,
+            isWaitingForScan,
+            isSaved,
+            connectionFailure,
+            connectDisabled: !!wifiConnectOperation,
+            getSecurityIcon,
+            onDetails: () => window.showWifiDetails(network.ssid),
+            onDisconnect: () => window.disconnectWifi(),
+            onConnect: () => window.connectWifi(network.ssid, network.security)
+        });
+        orderedItems.push(item);
     });
+    Array.from(itemMap.keys()).forEach(key => {
+        if (!nextKeys.has(key)) itemMap.delete(key);
+    });
+    reconcileDeviceList(wifiList, orderedItems);
 }
 
 // 尝试 STA 自动连接（不带 SSID）
 function switchToStaModeAuto() {
     console.log('[WiFi] 尝试 STA 自动连接...');
     showToast('正在尝试自动连接...');
+    setTimeout(() => {
+        initWifiStatus();
+    }, 1500);
     sendMessage('wifi', 'setMode', { mode: 1 }, (response) => {
         if (response.code === 0) {
             wifiStatus.mode = 1;
-            enableWifiUI();
+            initWifiStatus();
             showToast('WiFi 已开启（自动连接）');
             return;
         }
         if (isDeviceTransportError(response)) {
             console.warn('[WiFi] STA 自动连接请求失败:', response);
-            document.getElementById('wifiSwitchInput').checked = false;
-            showToast(`WiFi 开启失败: ${formatDeviceCommandError(response)}`);
+            sendMessage('wifi', 'getStatus', {}, (statusResponse) => {
+                if (statusResponse.code === 0 && statusResponse.data) {
+                    const wifiEnabled = statusResponse.data.enabled === undefined
+                        ? !!statusResponse.data.on
+                        : !!statusResponse.data.enabled;
+                    if (wifiEnabled) {
+                        applyWifiStatusSnapshot(statusResponse.data, { preserveConnecting: true });
+                        document.getElementById('wifiSwitchInput').checked = true;
+                        initWifiStatus();
+                        showToast('WiFi 已开启，设备正在后台自动连接');
+                        return;
+                    }
+                }
+                document.getElementById('wifiSwitchInput').checked = false;
+                wifiStatus.on = false;
+                wifiStatus.connecting = false;
+                updateWifiStatusBar();
+                showToast(`WiFi 开启失败: ${formatDeviceCommandError(response)}`);
+            });
+            return;
+        }
+        if (isWifiOwnerFault(response)) {
+            showWifiOwnerFault(response);
             return;
         }
         console.log('[WiFi] STA 自动连接不可用，切换到扫描模式:', response);
@@ -7393,40 +8100,47 @@ function switchToStaModeAuto() {
     });
 }
 
-window.forgetWifi = (ssid) => {
+window.deleteWifiNetwork = (ssid) => {
     if (!ssid) return;
-    showModal('忘记网络', `确定要忘记 <b>${escapeHtml(ssid)}</b> 吗？<div class="text-muted" style="margin-top:8px;">忘记后需要重新输入密码才能连接。</div>`, () => {
+    const modalBody = document.createElement('div');
+    modalBody.style.lineHeight = '1.6';
+    const message = document.createElement('div');
+    message.append('确定要删除 ');
+    const name = document.createElement('strong');
+    name.textContent = ssid;
+    message.appendChild(name);
+    message.append(' 吗？');
+    const hint = document.createElement('div');
+    hint.className = 'text-muted';
+    hint.style.marginTop = '8px';
+    hint.textContent = '删除后需要重新输入密码才能连接。';
+    modalBody.append(message, hint);
+    showModal('删除网络', modalBody, () => {
         sendMessage('wifi', 'forget', { ssid }, (resp) => {
             if (resp.code === 0) {
-                showToast('已忘记该网络');
+                showToast('已删除该网络');
+                wifiSavedSsids.delete(ssid);
                 // 刷新状态/列表
                 sendMessage('wifi', 'getStatus', {}, (statusResponse) => {
                     if (statusResponse.code === 0 && statusResponse.data) {
                         wifiStatus.connected = statusResponse.data.connected || false;
+                        wifiStatus.connecting = !!statusResponse.data.connecting || !!wifiConnectOperation;
+                        syncWifiSavedSsids(statusResponse.data);
                         wifiStatus.ssid = statusResponse.data.ssid || null;
                         wifiStatus.ip = statusResponse.data.ip || null;
-                        updateCurrentWifiName();
+                        wifiStatus.rssi = normalizeWifiRssi(statusResponse.data.rssi);
+                        updateWifiStatusBar();
                     }
                     // 重新扫描以刷新列表
                     scanWifiSilent();
                 });
             } else {
-                showToast(resp.msg || '忘记失败');
+                showToast(resp.msg || '删除失败');
             }
         });
     }, 'md');
 };
-// 更新当前连接的WiFi网络名称
-function updateCurrentWifiName() {
-    const currentWifiName = document.getElementById('currentWifiName');
-    if (wifiStatus.connected && wifiStatus.ssid) {
-        currentWifiName.textContent = wifiStatus.ssid;
-    } else {
-        currentWifiName.textContent = '未连接';
-    }
-
-    updateWifiStatusBar();
-}
+window.forgetWifi = window.deleteWifiNetwork;
 // HTML转义函数
 function escapeHtml(text) {
     if (window.UIComponents?.escapeHtml) {
@@ -7441,25 +8155,138 @@ function escapeHtml(text) {
     };
     return String(text).replace(/[&<>"']/g, m => map[m]);
 }
-window.connectWifi = (ssid, security) => {
-    // 连接WiFi前先切换到STA模式
-    const doConnect = (ssid, password) => {
-        showToast(`正在连接到 ${ssid}...`);
-        // 先切换到STA模式
-        sendMessage('wifi', 'setMode', {
-            mode: 1,  // STA模式
-            ssid: ssid,
-            password: password || ''
-        }, (response) => {
-            if (response.code === 0) {
-                wifiStatus.mode = 1;
-                console.log('[WiFi] 已切换到 STA 模式，正在连接...');
-                // 连接结果会通过事件推送
-            } else {
-                showToast(`连接失败: ${response.msg || '未知错误'}`);
-            }
-        });
+
+function clearWifiConnectionOperation() {
+    if (wifiConnectOperation?.timer) {
+        clearTimeout(wifiConnectOperation.timer);
+    }
+    if (wifiConnectOperation) {
+        wifiConnectOperation.password = '';
+    }
+    wifiConnectOperation = null;
+}
+
+function resumeWifiDiscovery() {
+    if (!serialConnected || !wifiStatus.on || wifiStatus.connecting ||
+        !isWifiSettingsActive()) return;
+    startWifiAutoScan(0);
+}
+
+function finishWifiConnection(ssid) {
+    if (wifiConnectOperation && wifiConnectOperation.ssid !== ssid) return;
+    clearWifiConnectionOperation();
+    wifiStatus.connecting = false;
+    renderWifiList();
+}
+
+function failWifiConnection(ssid = null, resumeDiscovery = true) {
+    if (wifiConnectOperation && ssid && wifiConnectOperation.ssid !== ssid) return;
+    clearWifiConnectionOperation();
+    wifiStatus.connecting = false;
+    updateWifiStatusBar();
+    renderWifiList();
+    if (resumeDiscovery) {
+        resumeWifiDiscovery();
+    }
+}
+
+function resetWifiConnectionAfterTransportLoss() {
+    clearWifiConnectionOperation();
+    wifiStatus.connecting = false;
+    wifiStatus.scanning = false;
+    wifiActiveScanNetworks = null;
+    stopWifiAutoScan();
+    updateWifiStatusBar();
+    renderWifiList();
+}
+
+function startPendingWifiConnection() {
+    const operation = wifiConnectOperation;
+    if (!operation || operation.started || wifiStatus.scanning) return;
+
+    operation.started = true;
+    operation.phase = 'connecting';
+    clearTimeout(operation.timer);
+    updateWifiStatusBar();
+    renderWifiList();
+    operation.timer = setTimeout(() => {
+        if (wifiConnectOperation?.id !== operation.id) return;
+        console.warn('[WiFi] 连接及 DHCP 等待超时:', operation.ssid);
+        wifiConnectionFailure = { ssid: operation.ssid, reason: '连接超时' };
+        failWifiConnection(operation.ssid, false);
+        showToast(`连接 ${operation.ssid} 超时`);
+        initWifiStatus();
+    }, WIFI_CONNECT_TIMEOUT_MS);
+    sendMessage('wifi', 'connect', {
+        ssid: operation.ssid,
+        password: operation.password || '',
+        useSaved: operation.useSaved,
+        save: true
+    }, (response) => {
+        operation.password = '';
+        if (wifiConnectOperation?.id !== operation.id) return;
+        if (response.code === 0) {
+            wifiStatus.mode = 1;
+            console.log('[WiFi] 连接请求已接受:', operation.ssid);
+            return;
+        }
+        if (response.code === 6) {
+            operation.started = false;
+            recoverWifiScanBusy();
+            return;
+        }
+        wifiConnectionFailure = {
+            ssid: operation.ssid,
+            reason: formatWifiConnectionFailure(response.msg)
+        };
+        failWifiConnection(operation.ssid);
+        showToast(`连接失败: ${formatDeviceCommandError(response)}`);
+        initWifiStatus();
+    });
+}
+
+function queueWifiConnection(ssid, password, useSaved = false) {
+    if (wifiConnectOperation) {
+        const target = wifiConnectOperation?.ssid;
+        showToast(target ? `正在连接到 ${target}，请稍候` : 'WiFi 正在连接，请稍候');
+        return;
+    }
+
+    pauseWifiAutoScan();
+    wifiConnectionFailure = null;
+    wifiStatus.connecting = true;
+    wifiConnectOperation = {
+        id: ++wifiConnectSequence,
+        ssid,
+        password: password || '',
+        useSaved,
+        phase: wifiStatus.scanning ? 'waitingScan' : 'connecting',
+        started: false,
+        timer: null
     };
+    const operation = wifiConnectOperation;
+    operation.timer = setTimeout(() => {
+        if (wifiConnectOperation?.id !== operation.id) return;
+        const target = operation.ssid;
+        console.warn('[WiFi] 等待扫描完成超时:', target);
+        wifiConnectionFailure = { ssid: target, reason: '等待扫描完成超时' };
+        failWifiConnection(target, false);
+        showToast(`等待扫描后连接 ${target} 超时，请重试`);
+        initWifiStatus();
+    }, WIFI_SCAN_QUEUE_TIMEOUT_MS);
+    updateWifiStatusBar();
+    renderWifiList();
+    showToast(wifiStatus.scanning ? `等待扫描完成后连接 ${ssid}...` : `正在连接到 ${ssid}...`);
+    startPendingWifiConnection();
+}
+
+window.connectWifi = (ssid, security) => {
+    const doConnect = (ssid, password, useSaved = false) =>
+        queueWifiConnection(ssid, password, useSaved);
+    if (wifiSavedSsids.has(ssid)) {
+        doConnect(ssid, '', true);
+        return;
+    }
     if (security === 'open') {
         // 开放网络直接连接
         doConnect(ssid, '');
@@ -7522,7 +8349,7 @@ window.showWifiDetails = (ssid) => {
             const status = statusResponse.data || {};
             const useDhcp = !ipConfig.ip || ipConfig.ip === status.ip; // 如果配置的IP和当前IP相同，可能是DHCP
             const modalBody = window.UIComponents?.buildWifiDetailsModal
-                ? window.UIComponents.buildWifiDetailsModal({ ssid, status, ipConfig, useDhcp, getRssiSignal })
+                ? window.UIComponents.buildWifiDetailsModal({ ssid, status, ipConfig, useDhcp })
                 : '';
             showModal(`📶 ${ssid}`, modalBody, () => {
                 // 保存配置
@@ -7573,6 +8400,13 @@ window.showWifiDetails = (ssid) => {
                     });
                 }
             }, '保存');
+            const deleteBtn = document.getElementById('wifiDeleteNetworkBtn');
+            if (deleteBtn) {
+                deleteBtn.addEventListener('click', () => {
+                    closeMainModal();
+                    window.deleteWifiNetwork(ssid);
+                });
+            }
         });
     });
 };
@@ -7624,9 +8458,26 @@ let bluetoothScanSeq = 0;
 let bluetoothRenderScheduled = false;
 let bluetoothOrderCounter = 0;
 const bluetoothOrderMap = new Map(); // key -> order
+let bluetoothStatusRetryTimer = null;
+let bluetoothStatusRetryCount = 0;
+const BLUETOOTH_STATUS_RETRY_LIMIT = 6;
+
+function scheduleBluetoothStatusRetry() {
+    if (bluetoothStatusRetryTimer || !serialConnected || bluetoothStatusRetryCount >= BLUETOOTH_STATUS_RETRY_LIMIT) return;
+    bluetoothStatusRetryCount++;
+    bluetoothStatusRetryTimer = setTimeout(() => {
+        bluetoothStatusRetryTimer = null;
+        initBluetoothStatus();
+    }, 1200);
+}
 
 function normalizeBtAddr(addr) {
     return String(addr || '').trim().toLowerCase();
+}
+
+function normalizeBluetoothPairingCode(value) {
+    const digits = String(value ?? '').replace(/\D/g, '');
+    return digits ? digits.padStart(6, '0').slice(-6) : '';
 }
 
 function btDeviceKey(device) {
@@ -7642,14 +8493,73 @@ function ensureBtOrder(key) {
     return bluetoothOrderMap.get(key);
 }
 
+const BLUETOOTH_PLACEHOLDER_NAMES = new Set([
+    'connected device',
+    'bluetooth device',
+    'bt device',
+    'unknown',
+    'unknown device',
+    '未连接',
+    '蓝牙设备',
+    '已连接'
+]);
+
+function isUsableBtName(addr, name) {
+    const value = String(name || '').trim();
+    if (!value) return false;
+    const normalized = value.toLowerCase().replace(/[\s_-]+/g, ' ');
+    const normalizedAddr = normalizeBtAddr(addr).toLowerCase();
+    return normalized !== normalizedAddr && !BLUETOOTH_PLACEHOLDER_NAMES.has(normalized);
+}
+
 function resolveBtName(addr, name) {
     const a = normalizeBtAddr(addr);
-    const n = String(name || '').trim();
-    if (n) {
-        bluetoothNameCache.set(a, n);
-        return n;
+    if (isUsableBtName(a, name)) {
+        bluetoothNameCache.set(a, String(name).trim());
     }
-    return bluetoothNameCache.get(a) || '';
+    const cached = bluetoothNameCache.get(a) || '';
+    if (!isUsableBtName(a, cached)) {
+        bluetoothNameCache.delete(a);
+        return '';
+    }
+    return cached;
+}
+
+function resolveFirstBtName(addr, ...names) {
+    for (const name of names) {
+        const resolved = resolveBtName(addr, name);
+        if (resolved) return resolved;
+    }
+    return resolveBtName(addr);
+}
+
+function resolveConnectedBtName(device) {
+    if (!device) return '';
+    const addr = normalizeBtAddr(device.addr);
+    const directName = resolveBtName(addr, device.name);
+    if (directName) return directName;
+
+    const candidates = [pendingBtConnect, ...(pairedDevices || []), ...(bluetoothDevices || [])];
+    for (const candidate of candidates) {
+        if (normalizeBtAddr(candidate?.addr) !== addr) continue;
+        const name = resolveBtName(addr, candidate?.name);
+        if (name) return name;
+    }
+    return '';
+}
+
+function updateBluetoothStatusBar() {
+    const statusEl = document.getElementById('btStatus');
+    if (!statusEl) return;
+    const device = bluetoothStatus.connectedDevice || connectedDevice;
+    if (!bluetoothStatus.connected || !device) {
+        statusEl.textContent = '未连接';
+        statusEl.title = '蓝牙未连接';
+        return;
+    }
+    const name = resolveConnectedBtName(device);
+    statusEl.textContent = name || '已连接';
+    statusEl.title = name ? `蓝牙已连接：${name}` : '蓝牙已连接';
 }
 
 function scheduleRenderBluetoothList() {
@@ -7671,39 +8581,57 @@ function isBluetoothSettingsActive() {
 // 初始化蓝牙状态
 function initBluetoothStatus() {
     sendMessage('bluetooth', 'getStatus', null, (response) => {
-        if (response.code === 0 && response.data) {
+        if (!response || response.code !== 0 || !response.data) {
+            bluetoothStatus.localName = null;
+            updateBluetoothLocalName();
+            scheduleBluetoothStatusRetry();
+            return;
+        }
+        if (bluetoothStatusRetryTimer) {
+            clearTimeout(bluetoothStatusRetryTimer);
+            bluetoothStatusRetryTimer = null;
+        }
+        {
             const mode = response.data.mode || 0;
             bluetoothStatus.mac = response.data.mac || null;
 
             if (typeof response.data.localName === 'string' && response.data.localName.trim()) {
                 bluetoothStatus.localName = response.data.localName.trim();
+            } else {
+                bluetoothStatus.localName = null;
             }
 
             // Best-effort: some firmwares may return current connection info in getStatus
-            if (response.data.connectedDevice?.addr) {
+            if (response.data.connected === true && response.data.connectedDevice?.addr) {
                 bluetoothStatus.connected = true;
                 bluetoothStatus.connectedDevice = {
                     addr: response.data.connectedDevice.addr,
-                    name: resolveBtName(response.data.connectedDevice.addr, response.data.connectedDevice.name),
-                    profiles: response.data.connectedDevice.profiles
+                    name: resolveFirstBtName(response.data.connectedDevice.addr, response.data.connectedDevice.name),
+                    profiles: response.data.connectedDevice.profiles || [],
+                    channelState: response.data.connectedDevice.channelState,
+                    hfpMicrophoneAvailable: response.data.connectedDevice.hfpMicrophoneAvailable === true
                 };
                 connectedDevice = bluetoothStatus.connectedDevice;
-                const btStatusEl = document.getElementById('btStatus');
-                if (btStatusEl) {
-                    btStatusEl.textContent = bluetoothStatus.connectedDevice.name || '已连接';
-                }
-            } else if (response.data.connected && response.data.addr) {
+                bluetoothConnected = true;
+                bluetoothStatusRetryCount = 0;
+            } else if (response.data.connected === true && response.data.addr) {
                 bluetoothStatus.connected = true;
                 bluetoothStatus.connectedDevice = {
                     addr: response.data.addr,
-                    name: resolveBtName(response.data.addr, response.data.name)
+                    name: resolveFirstBtName(response.data.addr, response.data.name)
                 };
                 connectedDevice = bluetoothStatus.connectedDevice;
-                const btStatusEl = document.getElementById('btStatus');
-                if (btStatusEl) {
-                    btStatusEl.textContent = bluetoothStatus.connectedDevice.name || '已连接';
-                }
+                bluetoothConnected = true;
+                bluetoothStatusRetryCount = 0;
+            } else {
+                bluetoothStatus.connected = false;
+                bluetoothStatus.connectedDevice = null;
+                connectedDevice = null;
+                bluetoothConnected = false;
+                if (mode !== 0) scheduleBluetoothStatusRetry();
             }
+
+            updateBluetoothStatusBar();
 
             // 显示设备 MAC
             {
@@ -7713,7 +8641,6 @@ function initBluetoothStatus() {
                 }
             }
             const bluetoothSwitchInput = document.getElementById('bluetoothSwitchInput');
-            const bluetoothDeviceName = document.getElementById('bluetoothDeviceName');
             const bluetoothDevicesContainer = document.getElementById('bluetoothDevicesContainer');
             const bluetoothModeRow = document.getElementById('bluetoothModeRow');
             const bluetoothModeSelect = document.getElementById('bluetoothModeSelect');
@@ -7721,12 +8648,10 @@ function initBluetoothStatus() {
             if (mode !== 0) {
                 bluetoothStatus.enabled = true;
                 bluetoothSwitchInput.checked = true;
-                bluetoothDeviceName.style.display = 'flex';
                 bluetoothDevicesContainer.style.display = 'block';
                 if (bluetoothModeRow) bluetoothModeRow.style.display = 'flex';
                 if (bluetoothModeSelect) bluetoothModeSelect.value = String(mode);
                 if (bluetoothLocalNameRow) bluetoothLocalNameRow.style.display = 'flex';
-                // 更新当前连接的设备名称
                 updateCurrentBluetoothDevice();
                 updateBluetoothLocalName();
                 // 获取已配对设备
@@ -7734,6 +8659,7 @@ function initBluetoothStatus() {
                     if (pairResponse.code === 0 && pairResponse.data?.devices) {
                         pairedDevices = pairResponse.data.devices;
                         pairedDevices.forEach(d => resolveBtName(d.addr, d.name));
+                        updateBluetoothStatusBar();
                         scheduleRenderBluetoothList();
                     }
                 });
@@ -7750,11 +8676,11 @@ function initBluetoothStatus() {
             } else {
                 bluetoothStatus.enabled = false;
                 bluetoothSwitchInput.checked = false;
-                bluetoothDeviceName.style.display = 'none';
                 bluetoothDevicesContainer.style.display = 'none';
                 if (bluetoothModeRow) bluetoothModeRow.style.display = 'none';
                 if (bluetoothLocalNameRow) bluetoothLocalNameRow.style.display = 'none';
             }
+            audioRouteRenderSettings();
             console.log('[Bluetooth] 状态初始化完成 - Mode:', mode, bluetoothStatus);
         }
     });
@@ -7801,8 +8727,7 @@ window.renameLocalBluetoothDevice = () => {
         }
         sendMessage('bluetooth', 'setLocalName', { name }, (resp) => {
             if (resp && resp.code === 0) {
-                bluetoothStatus.localName = (resp.data && resp.data.localName) ? resp.data.localName : name;
-                updateBluetoothLocalName();
+                initBluetoothStatus();
                 showToast('蓝牙名称已更新');
                 return;
             }
@@ -7819,7 +8744,6 @@ function toggleBluetoothSwitch() {
 }
 // 处理蓝牙开关状态变化
 function handleBluetoothSwitchChange(isOn) {
-    const bluetoothDeviceName = document.getElementById('bluetoothDeviceName');
     const bluetoothDevicesContainer = document.getElementById('bluetoothDevicesContainer');
     const bluetoothModeRow = document.getElementById('bluetoothModeRow');
     const bluetoothModeSelect = document.getElementById('bluetoothModeSelect');
@@ -7859,7 +8783,6 @@ function handleBluetoothSwitchChange(isOn) {
                 if (btStatusEl) btStatusEl.textContent = '未连接';
                 updateCurrentBluetoothDevice();
                 if (bluetoothLocalNameRow) bluetoothLocalNameRow.style.display = 'none';
-                bluetoothDeviceName.style.display = 'none';
                 bluetoothDevicesContainer.style.display = 'none';
                 if (bluetoothModeRow) bluetoothModeRow.style.display = 'none';
                 // 停止自动扫描
@@ -7905,15 +8828,12 @@ document.addEventListener('change', function (e) {
 });
 // 启用蓝牙 UI
 function enableBluetoothUI() {
-    const bluetoothDeviceName = document.getElementById('bluetoothDeviceName');
     const bluetoothDevicesContainer = document.getElementById('bluetoothDevicesContainer');
     const bluetoothModeRow = document.getElementById('bluetoothModeRow');
     const bluetoothLocalNameRow = document.getElementById('bluetoothLocalNameRow');
-    bluetoothDeviceName.style.display = 'flex';
     bluetoothDevicesContainer.style.display = 'block';
     if (bluetoothModeRow) bluetoothModeRow.style.display = 'flex';
     if (bluetoothLocalNameRow) bluetoothLocalNameRow.style.display = 'flex';
-    // 更新当前连接的设备名称
     updateCurrentBluetoothDevice();
     updateBluetoothLocalName();
     // 获取已配对设备
@@ -7921,6 +8841,7 @@ function enableBluetoothUI() {
         if (response.code === 0 && response.data?.devices) {
             pairedDevices = response.data.devices;
             pairedDevices.forEach(d => resolveBtName(d.addr, d.name));
+            updateBluetoothStatusBar();
             scheduleRenderBluetoothList();
         }
     });
@@ -7962,12 +8883,14 @@ function scanBluetoothSilent() {
     // Do not clear the list on each scan; keep previous results to avoid flicker.
     bluetoothScanSeq++;
 
+    isScanning = true;
     bluetoothStatus.scanning = true;
     scheduleRenderBluetoothList();
     // 发送开始扫描命令
     sendMessage('bluetooth', 'startScan', { duration: 8 }, (response) => {
         if (response.code !== 0) {
             console.warn('[Bluetooth] 扫描失败:', response.msg);
+            isScanning = false;
             bluetoothStatus.scanning = false;
             scheduleRenderBluetoothList();
         }
@@ -7980,9 +8903,11 @@ function updateCurrentBluetoothDevice() {
     if (!currentBluetoothDevice) {
         return;
     }
-    const dev = (bluetoothStatus.connected && bluetoothStatus.connectedDevice) ? bluetoothStatus.connectedDevice : connectedDevice;
+    const dev = bluetoothStatus.connected
+        ? (bluetoothStatus.connectedDevice || connectedDevice)
+        : null;
     if (dev) {
-        const name = resolveBtName(dev.addr, dev.name);
+        const name = resolveConnectedBtName(dev);
         currentBluetoothDevice.textContent = name || dev.addr || '已连接';
     } else {
         currentBluetoothDevice.textContent = '未连接';
@@ -7990,17 +8915,18 @@ function updateCurrentBluetoothDevice() {
 }
 // 更新蓝牙UI状态
 function updateBluetoothUI(status) {
-    // 更新状态栏
-    const btStatus = document.getElementById('btStatus');
     if (status.connected && status.connectedDevice) {
-        btStatus.textContent = resolveBtName(status.connectedDevice.addr, status.connectedDevice.name) || '已连接';
+        bluetoothStatus.connected = true;
+        bluetoothStatus.connectedDevice = status.connectedDevice;
         bluetoothConnected = true; // 更新蓝牙连接状态
         connectedDevice = status.connectedDevice;
     } else {
-        btStatus.textContent = '未连接';
+        bluetoothStatus.connected = false;
+        bluetoothStatus.connectedDevice = null;
         bluetoothConnected = false; // 更新蓝牙连接状态
         connectedDevice = null;
     }
+    updateBluetoothStatusBar();
     updateCurrentBluetoothDevice();
     scheduleRenderBluetoothList();
 }
@@ -8032,7 +8958,7 @@ function renderBluetoothList() {
         if (!d || !d.addr) return;
         const sd = { ...d };
         sd.transport = d.transport || 'edr';
-        sd.paired = false;
+        sd.paired = sd.paired === true;
         sd.name = resolveBtName(sd.addr, sd.name);
         if (!sd.lastSeenMs) sd.lastSeenMs = now;
         scannedByKey.set(btDeviceKey(sd), sd);
@@ -8056,20 +8982,13 @@ function renderBluetoothList() {
     scannedByKey.forEach(sd => {
         const addr = normalizeBtAddr(sd.addr);
         if (pairedByAddr.has(addr)) return;
-        if (sd.lastSeenMs && (now - sd.lastSeenMs) > BLUETOOTH_SCAN_DEVICE_TTL_MS) return;
         merged.push(sd);
     });
 
-    const connAddr = normalizeBtAddr(connectedDevice?.addr);
-    merged.sort((a, b) => {
-        const aConn = normalizeBtAddr(a.addr) === connAddr ? 0 : 1;
-        const bConn = normalizeBtAddr(b.addr) === connAddr ? 0 : 1;
-        if (aConn !== bConn) return aConn - bConn;
-        const aPair = a.paired ? 0 : 1;
-        const bPair = b.paired ? 0 : 1;
-        if (aPair !== bPair) return aPair - bPair;
-        return ensureBtOrder(btDeviceKey(a)) - ensureBtOrder(btDeviceKey(b));
-    });
+    const connAddr = bluetoothStatus.connected
+        ? normalizeBtAddr((bluetoothStatus.connectedDevice || connectedDevice)?.addr)
+        : '';
+    merged.sort((a, b) => ensureBtOrder(btDeviceKey(a)) - ensureBtOrder(btDeviceKey(b)));
 
     // Keyed DOM reuse to avoid flicker
     if (!renderBluetoothList._itemMap) {
@@ -8077,16 +8996,13 @@ function renderBluetoothList() {
     }
     const itemMap = renderBluetoothList._itemMap;
     const nextKeys = new Set();
-    const frag = document.createDocumentFragment();
+    const orderedItems = [];
 
     if (merged.length === 0) {
-        const placeholder = document.createElement('div');
-        placeholder.className = 'device-item';
-        placeholder.style.justifyContent = 'center';
-        placeholder.style.color = 'var(--text-secondary)';
-        placeholder.textContent = bluetoothStatus.scanning ? '正在搜索设备...' : '暂无设备';
-        frag.appendChild(placeholder);
-        bluetoothList.replaceChildren(frag);
+        renderDeviceListState(
+            bluetoothList,
+            bluetoothStatus.scanning ? '正在搜索设备...' : '暂无设备'
+        );
         return;
     }
 
@@ -8097,7 +9013,8 @@ function renderBluetoothList() {
         let refs = itemMap.get(key);
         if (!refs) {
             const item = document.createElement('div');
-            item.className = 'device-item';
+            item.className = 'device-item ui-list-item';
+            item.dataset.deviceKey = `bluetooth:${key}`;
 
             const icon = document.createElement('div');
             icon.className = 'icon-md';
@@ -8121,7 +9038,7 @@ function renderBluetoothList() {
             item.appendChild(info);
             item.appendChild(actions);
 
-            refs = { item, icon, nameEl, metaEl, actions };
+            refs = { item, icon, nameEl, metaEl, actions, actionMode: '', device: null };
             itemMap.set(key, refs);
         }
 
@@ -8129,6 +9046,7 @@ function renderBluetoothList() {
         const isPaired = !!device.paired;
         const isBle = (device.transport || 'edr') === 'ble';
         const deviceIcon = getBluetoothDeviceIcon(device.class);
+        refs.item.classList.toggle('is-connected', Boolean(isConnected));
 
         refs.icon.textContent = deviceIcon;
         refs.nameEl.textContent = resolveBtName(device.addr, device.name) || 'Unknown Device';
@@ -8142,45 +9060,46 @@ function renderBluetoothList() {
             refs.metaEl.textContent = isBle ? `BLE 设备 | RSSI: ${rssiText} dBm` : `RSSI: ${rssiText} dBm`;
         }
 
-        // Actions (rebuild buttons, but keep item stable)
-        refs.actions.replaceChildren();
-        if (isConnected) {
-            const btnDisc = document.createElement('button');
-            btnDisc.className = 'btn-base btn-sm btn-warning';
-            btnDisc.textContent = '断开';
-            btnDisc.addEventListener('click', () => disconnectBluetooth(device.addr, refs.nameEl.textContent));
-
-            const btnForget = document.createElement('button');
-            btnForget.className = 'btn-base btn-sm btn-secondary';
-            btnForget.textContent = '忘记';
-            btnForget.addEventListener('click', () => forgetBluetooth(device.addr, refs.nameEl.textContent));
-
-            refs.actions.appendChild(btnDisc);
-            refs.actions.appendChild(btnForget);
-        } else if (isBle) {
-            const btnBle = document.createElement('button');
-            btnBle.className = 'btn-base btn-sm btn-secondary';
-            btnBle.textContent = 'BLE';
-            btnBle.disabled = true;
-            btnBle.title = 'BLE设备暂不支持经典蓝牙连接';
-            refs.actions.appendChild(btnBle);
-        } else {
-            const btnConn = document.createElement('button');
-            btnConn.className = 'btn-base btn-sm btn-success';
-            btnConn.textContent = '连接';
-            btnConn.addEventListener('click', () => connectBluetooth(device.addr, refs.nameEl.textContent));
-            refs.actions.appendChild(btnConn);
-
-            if (isPaired) {
+        refs.device = device;
+        const actionMode = isConnected ? 'connected' : isBle ? 'ble' : isPaired ? 'paired' : 'available';
+        if (refs.actionMode !== actionMode) {
+            refs.actions.replaceChildren();
+            if (isConnected) {
+                const btnDisc = document.createElement('button');
+                btnDisc.className = 'btn-base btn-sm btn-warning';
+                btnDisc.textContent = '断开';
+                btnDisc.addEventListener('click', () => disconnectBluetooth(refs.device.addr, refs.nameEl.textContent));
                 const btnForget = document.createElement('button');
                 btnForget.className = 'btn-base btn-sm btn-secondary';
                 btnForget.textContent = '忘记';
-                btnForget.addEventListener('click', () => forgetBluetooth(device.addr, refs.nameEl.textContent));
+                btnForget.addEventListener('click', () => forgetBluetooth(refs.device.addr, refs.nameEl.textContent));
+                refs.actions.appendChild(btnDisc);
                 refs.actions.appendChild(btnForget);
+            } else if (isBle) {
+                const btnBle = document.createElement('button');
+                btnBle.className = 'btn-base btn-sm btn-secondary';
+                btnBle.textContent = 'BLE';
+                btnBle.disabled = true;
+                btnBle.title = 'BLE设备暂不支持经典蓝牙连接';
+                refs.actions.appendChild(btnBle);
+            } else {
+                const btnConn = document.createElement('button');
+                btnConn.className = 'btn-base btn-sm btn-success';
+                btnConn.textContent = isPaired ? '连接' : '配对并连接';
+                btnConn.addEventListener('click', () => connectBluetooth(refs.device.addr, refs.nameEl.textContent));
+                refs.actions.appendChild(btnConn);
+                if (isPaired) {
+                    const btnForget = document.createElement('button');
+                    btnForget.className = 'btn-base btn-sm btn-secondary';
+                    btnForget.textContent = '忘记';
+                    btnForget.addEventListener('click', () => forgetBluetooth(refs.device.addr, refs.nameEl.textContent));
+                    refs.actions.appendChild(btnForget);
+                }
             }
+            refs.actionMode = actionMode;
         }
 
-        frag.appendChild(refs.item);
+        orderedItems.push(refs.item);
     });
 
     // Cleanup removed keys
@@ -8190,7 +9109,7 @@ function renderBluetoothList() {
         }
     });
 
-    bluetoothList.replaceChildren(frag);
+    reconcileDeviceList(bluetoothList, orderedItems);
 }
 // 根据设备类型获取图标
 function getBluetoothDeviceIcon(deviceClass) {
@@ -8206,27 +9125,32 @@ function getBluetoothDeviceIcon(deviceClass) {
 }
 // 连接蓝牙设备
 window.connectBluetooth = (addr, name) => {
-    // 根据设备类型判断是否需要配对确认
-    const device = bluetoothDevices.find(d => d.addr === addr) ||
-        pairedDevices.find(d => d.addr === addr);
-    // 获取设备图标
-    const deviceIcon = getBluetoothDeviceIcon(device?.class);
-    // 某些设备类型可能需要配对码确认（未配对的设备显示确认界面）
-    const needsPairingConfirm = device && !device.paired;
-    if (needsPairingConfirm) {
-        // 生成随机配对码用于显示（实际配对由下位机处理）
-        const pairingCode = Math.floor(100000 + Math.random() * 900000);
-        const modalBody = window.UIComponents?.buildBluetoothPairingModal
-            ? window.UIComponents.buildBluetoothPairingModal({ deviceIcon, name, addr, pairingCode })
-            : '';
-        showModal('蓝牙配对', modalBody, () => {
-            // 用户确认后发送连接请求
-            performBluetoothConnect(addr, name);
+    if (bluetoothStatus.scanning || isScanning) {
+        stopBluetoothAutoScan();
+        pendingBtConnect = { addr, name, waitingForScanStop: true };
+        showToast(`正在停止搜索并连接到 ${name}...`);
+        sendMessage('bluetooth', 'stopScan', {}, (response) => {
+            if (response.code !== 0) {
+                showToast(`停止搜索失败: ${response.msg || '未知错误'}`);
+                pendingBtConnect = null;
+                return;
+            }
+
+            // stopScan clears the device scan state before the controller emits
+            // inquiry-complete, so keep a bounded fallback for older firmware.
+            setTimeout(() => {
+                if (pendingBtConnect?.waitingForScanStop &&
+                    normalizeBtAddr(pendingBtConnect.addr) === normalizeBtAddr(addr)) {
+                    pendingBtConnect.waitingForScanStop = false;
+                    isScanning = false;
+                    bluetoothStatus.scanning = false;
+                    performBluetoothConnect(addr, name);
+                }
+            }, 800);
         });
-    } else {
-        // 已配对设备或不需要确认，直接连接
-        performBluetoothConnect(addr, name);
+        return;
     }
+    performBluetoothConnect(addr, name);
 };
 // 执行实际的蓝牙连接
 function performBluetoothConnect(addr, name) {
@@ -11397,6 +12321,250 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 });
 // ==================== 系统更新功能（安全更新）====================
+let secureUpdateCheckOperationId = null;
+let secureUpdateAvailableInfo = null;
+let secureUpdateCheckTimer = null;
+let onlineUpdateStartedAt = 0;
+let onlineUpdateElapsedTimer = null;
+
+function setOnlineUpdateProgressVisible(visible) {
+    const progress = document.getElementById('updateProgress');
+    const summary = document.getElementById('onlineUpdateSummary');
+    if (progress) {
+        progress.hidden = !visible;
+        progress.style.display = visible ? 'flex' : 'none';
+    }
+    if (summary) summary.hidden = visible;
+}
+
+function updateOnlineUpdateElapsed() {
+    const elapsed = document.getElementById('updateProgressElapsed');
+    if (!elapsed || !onlineUpdateStartedAt) return;
+    const seconds = Math.max(0, Math.floor((Date.now() - onlineUpdateStartedAt) / 1000));
+    const minutes = Math.floor(seconds / 60);
+    elapsed.textContent = `耗时 ${String(minutes).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
+function resetOnlineUpdateProgress() {
+    onlineUpdateStartedAt = Date.now();
+    updateOnlineUpdateElapsed();
+    if (onlineUpdateElapsedTimer) clearInterval(onlineUpdateElapsedTimer);
+    onlineUpdateElapsedTimer = setInterval(updateOnlineUpdateElapsed, 1000);
+    setOnlineUpdateProgressVisible(true);
+}
+
+function finishOnlineUpdateProgress() {
+    if (onlineUpdateElapsedTimer) {
+        clearInterval(onlineUpdateElapsedTimer);
+        onlineUpdateElapsedTimer = null;
+    }
+    updateOnlineUpdateElapsed();
+}
+
+function resetOnlineUpdateView() {
+    finishOnlineUpdateProgress();
+    onlineUpdateStartedAt = 0;
+    secureUpdateAvailableInfo = null;
+    secureUpdateCheckOperationId = null;
+    secureUpdateInProgress = false;
+    if (secureUpdateCheckTimer) {
+        clearTimeout(secureUpdateCheckTimer);
+        secureUpdateCheckTimer = null;
+    }
+    setOnlineUpdateAction('check');
+    setOnlineUpdateProgressVisible(false);
+
+    const updateStatus = document.getElementById('updateStatus');
+    const progress = document.getElementById('updateProgress');
+    const fill = document.getElementById('updateProgressFill');
+    const text = document.getElementById('updateProgressText');
+    const stage = document.getElementById('updateProgressStage');
+    const units = document.getElementById('updateProgressUnits');
+    const elapsed = document.getElementById('updateProgressElapsed');
+    const details = document.getElementById('updateProgressDetails');
+    if (updateStatus) {
+        updateStatus.textContent = '准备就绪';
+        updateStatus.style.color = '';
+    }
+    if (progress) progress.dataset.state = 'waiting';
+    if (fill) fill.style.width = '0%';
+    if (text) text.textContent = '0%';
+    if (stage) stage.textContent = '等待开始';
+    if (units) units.textContent = '阶段 0/3';
+    if (elapsed) elapsed.textContent = '耗时 00:00';
+    if (details) details.textContent = '准备中...';
+}
+
+function refreshOnlineUpdateViewAfterReconnect() {
+    sendMessageWithTimeout('update', 'getProgress', {}, 5000, (response) => {
+        const data = response?.data;
+        if (response?.code !== 0 || !data) return;
+        if (data.status === 'idle' && !data.readyToInstall) {
+            resetOnlineUpdateView();
+            return;
+        }
+        updateUpdateProgress(data);
+    });
+}
+
+function refreshCurrentFirmwareVersion() {
+    sendMessageWithTimeout('update', 'getVersion', {}, 3000, (response) => {
+        const version = response?.data?.version;
+        const element = document.getElementById('currentVersion');
+        if (element) element.textContent = version || '未知';
+    });
+}
+
+function setOnlineUpdateAction(action) {
+    const checkButton = document.getElementById('checkUpdateBtn');
+    const updateButton = document.getElementById('updateBtn');
+    if (!checkButton || !updateButton) return;
+
+    if (action === 'check') {
+        checkButton.style.display = 'inline-flex';
+        checkButton.disabled = false;
+        updateButton.style.display = 'none';
+        return;
+    }
+
+    checkButton.style.display = 'none';
+    updateButton.style.display = 'inline-flex';
+    updateButton.disabled = false;
+    updateButton.style.opacity = '1';
+    updateButton.classList.remove('btn-danger');
+    updateButton.classList.add('btn-primary');
+    if (action === 'download') {
+        updateButton.onclick = startSecureDownload;
+        updateButton.querySelector('span:last-child').textContent = '开始下载更新';
+        updateButton.querySelector('.btn-icon').textContent = '⬇️';
+    } else {
+        updateButton.onclick = startSecureUpdate;
+        updateButton.querySelector('span:last-child').textContent = '开始安全更新';
+        updateButton.querySelector('.btn-icon').textContent = '🔐';
+    }
+}
+
+const secureUpdateDetailLabels = {
+    'preparing source': '正在准备更新源...',
+    'metadata received': '已获取固件元数据',
+    'metadata signature verified': '固件签名验证通过',
+    'manifest validated': '版本清单验证完成',
+    'downloaded and verified; ready to install': '固件下载并校验完成，等待安装'
+};
+
+function localizeSecureUpdateDetail(detail) {
+    if (!detail) return '';
+    if (secureUpdateDetailLabels[detail]) return secureUpdateDetailLabels[detail];
+    const sourceMatch = /^connecting source (\d+)\/(\d+)$/.exec(detail);
+    return sourceMatch
+        ? `正在连接更新源 ${sourceMatch[1]}/${sourceMatch[2]}...`
+        : detail;
+}
+
+function renderSecureUpdateCheckProgress(percent, detail, state = 'running') {
+    const progress = document.getElementById('updateProgress');
+    const fill = document.getElementById('updateProgressFill');
+    const text = document.getElementById('updateProgressText');
+    const details = document.getElementById('updateProgressDetails');
+    const stage = document.getElementById('updateProgressStage');
+    const units = document.getElementById('updateProgressUnits');
+    const value = Math.max(0, Math.min(100, Number(percent) || 0));
+
+    // Source fallback can take seconds. Keep device-reported check progress
+    // visible; do not regress this flow to the status text alone.
+    setOnlineUpdateProgressVisible(true);
+    progress.dataset.state = state;
+    fill.style.width = `${value}%`;
+    text.textContent = `${Math.round(value)}%`;
+    if (stage) stage.textContent = state === 'error' ? '检查失败' : (state === 'success' ? '检查完成' : '检查更新');
+    if (units) units.textContent = '阶段 1/3';
+    details.textContent = localizeSecureUpdateDetail(detail) || '正在检查更新...';
+}
+
+function finishSecureUpdateCheck(code, message, data) {
+    const updateStatus = document.getElementById('updateStatus');
+    const checkUpdateBtn = document.getElementById('checkUpdateBtn');
+    const updateBtn = document.getElementById('updateBtn');
+
+    if (secureUpdateCheckTimer) {
+        clearTimeout(secureUpdateCheckTimer);
+        secureUpdateCheckTimer = null;
+    }
+    finishOnlineUpdateProgress();
+
+    checkUpdateBtn.disabled = false;
+    checkUpdateBtn.style.opacity = '1';
+    if (code === 0) {
+        renderSecureUpdateCheckProgress(
+            100,
+            data && data.version ? `发现新版本 ${data.version}` : (message || '已是最新版本'),
+            'success'
+        );
+        if (data && data.version) {
+            if (isUpdateVersionIgnored(data.version)) {
+                updateStatus.textContent = `已忽略更新 ${data.version}`;
+                updateStatus.style.color = 'var(--text-secondary)';
+                secureUpdateAvailableInfo = null;
+                setOnlineUpdateAction('check');
+                showToast(`已忽略 ${data.version}`, 2000);
+                return;
+            }
+            updateStatus.textContent = `发现新版本 ${data.version}`;
+            updateStatus.style.color = '#32d74b';
+            secureUpdateAvailableInfo = data;
+            setOnlineUpdateAction('download');
+            showToast('发现新版本', 2000);
+        } else {
+            updateStatus.textContent = message || '已是最新版本';
+            updateStatus.style.color = 'var(--text-secondary)';
+            secureUpdateAvailableInfo = null;
+            setOnlineUpdateAction('check');
+            showToast(message || '已是最新版本', 2000);
+        }
+        return;
+    }
+
+    const currentPercent = parseFloat(document.getElementById('updateProgressText')?.textContent) || 0;
+    renderSecureUpdateCheckProgress(currentPercent, message || '检查更新失败', 'error');
+    updateStatus.textContent = message || '检查更新失败';
+    updateStatus.style.color = '#ff453a';
+    secureUpdateAvailableInfo = null;
+    setOnlineUpdateAction('check');
+    showToast(message || '检查更新失败', 3000);
+}
+
+function startSecureDownload() {
+    const updateButton = document.getElementById('updateBtn');
+    const updateStatus = document.getElementById('updateStatus');
+    if (!secureUpdateAvailableInfo) {
+        setOnlineUpdateAction('check');
+        return;
+    }
+    updateButton.disabled = true;
+    updateButton.style.opacity = '0.5';
+    updateStatus.textContent = '正在下载并校验固件...';
+    updateStatus.style.color = 'var(--accent-color)';
+    resetOnlineUpdateProgress();
+    renderSecureUpdateCheckProgress(0, '正在启动固件下载...', 'running');
+    const stage = document.getElementById('updateProgressStage');
+    const units = document.getElementById('updateProgressUnits');
+    if (stage) stage.textContent = '下载固件';
+    if (units) units.textContent = '阶段 1/3';
+    sendMessage('update', 'startDownload', {}, (response) => {
+        if (response.code !== 0) {
+            updateButton.disabled = false;
+            updateButton.style.opacity = '1';
+            renderSecureUpdateCheckProgress(0, response.msg || '启动下载失败', 'error');
+            finishOnlineUpdateProgress();
+            showToast(response.msg || '启动下载失败', 3000);
+            return;
+        }
+        secureUpdateInProgress = true;
+        updateProgressTimer = null;
+        showToast('固件下载已开始', 2000);
+    });
+}
+
 /**
  * 检查安全更新（连接服务器查询是否有新版本）
  */
@@ -11404,44 +12572,31 @@ function checkSecureUpdate() {
     const updateStatus = document.getElementById('updateStatus');
     const checkUpdateBtn = document.getElementById('checkUpdateBtn');
     const updateBtn = document.getElementById('updateBtn');
+    setOnlineUpdateAction('check');
     // 禁用检查按钮
     checkUpdateBtn.disabled = true;
     checkUpdateBtn.style.opacity = '0.5';
     updateStatus.textContent = '正在连接更新服务器...';
     updateStatus.style.color = 'var(--accent-color)';
+    resetOnlineUpdateProgress();
+    renderSecureUpdateCheckProgress(2, '正在准备更新源...');
     // 发送检查更新请求（服务器会返回最新版本信息）
     // 注意：这里不需要实际下载，只是查询版本信息
     sendMessage('update', 'checkUpdate', {}, (response) => {
-        checkUpdateBtn.disabled = false;
-        checkUpdateBtn.style.opacity = '1';
-        if (response.code === 0) {
-            // 下位机返回 code=0 时，可能是“有新版本”或“已是最新”
-            if (response.data && response.data.version) {
-                if (isUpdateVersionIgnored(response.data.version)) {
-                    updateStatus.textContent = `已忽略更新 ${response.data.version}`;
-                    updateStatus.style.color = 'var(--text-secondary)';
-                    updateBtn.style.display = 'none';
-                    showToast(`已忽略 ${response.data.version}`, 2000);
-                    return;
-                }
-                updateStatus.textContent = `发现新版本 ${response.data.version}`;
-                updateStatus.style.color = '#32d74b';
-                updateBtn.style.display = 'inline-flex';
-                showToast('发现新版本', 2000);
-            } else {
-                updateStatus.textContent = response.msg || '已是最新版本';
-                updateStatus.style.color = 'var(--text-secondary)';
-                updateBtn.style.display = 'none';
-                showToast(response.msg || '已是最新版本', 2000);
-            }
+        if (response.code !== 0) {
+            finishSecureUpdateCheck(response.code, response.msg, null);
             return;
         }
-
-        // 下位机错误（例如 WiFi 未开启/未连接/服务器不可用）
-        updateStatus.textContent = response.msg || '检查更新失败';
-        updateStatus.style.color = '#ff453a';
-        updateBtn.style.display = 'none';
-        showToast(response.msg || '检查更新失败', 3000);
+        if (!response.data?.accepted || !response.data.operationId) {
+            finishSecureUpdateCheck(9000, '设备返回了无效的检查更新响应', null);
+            return;
+        }
+        secureUpdateCheckOperationId = response.data.operationId;
+        updateStatus.textContent = '正在检查更新...';
+        secureUpdateCheckTimer = setTimeout(() => {
+            secureUpdateCheckOperationId = null;
+            finishSecureUpdateCheck(9000, '检查更新超过 33 秒，请稍后重试', null);
+        }, 32800);
     });
 }
 /**
@@ -11457,14 +12612,16 @@ function startSecureUpdate() {
     // 确认对话框
     showConfirmDialog(
         '确认安全更新',
-        '更新过程将执行以下步骤：\n1. HMAC-SHA256设备认证\n2. 下载AES加密固件\n3. 实时解密并校验SHA256\n4. 写入Flash并重启\n\n请确保电源稳定。确定要开始更新吗？',
+        '已下载并校验的固件将提交到备用分区，设备随后重启切换。\n\n请确保电源稳定。确定要开始安全更新吗？',
         () => {
             // 用户确认，开始安全更新
+            resetOnlineUpdateProgress();
             updateBtn.disabled = true;
             updateBtn.style.opacity = '0.5';
             updateStatus.textContent = '正在连接更新服务器...';
             updateStatus.style.color = 'var(--accent-color)';
-            updateProgress.style.display = 'flex';
+            setOnlineUpdateProgressVisible(true);
+            updateProgress.dataset.state = 'running';
             updateProgressFill.style.width = '0%';
             updateProgressText.textContent = '0%';
             updateProgressDetails.textContent = '正在连接更新服务器...';
@@ -11479,9 +12636,11 @@ function startSecureUpdate() {
                 } else {
                     updateBtn.disabled = false;
                     updateBtn.style.opacity = '1';
-                    updateProgress.style.display = 'none';
+                    updateProgress.dataset.state = 'error';
                     updateStatus.textContent = response.msg || '启动更新失败';
                     updateStatus.style.color = '#ff453a';
+                    updateProgressDetails.textContent = response.msg || '启动更新失败';
+                    finishOnlineUpdateProgress();
                     showToast(response.msg || '启动更新失败', 3000);
                 }
             });
@@ -11514,7 +12673,7 @@ function focusUpdateSettingsPanel() {
 
             const p = document.getElementById('updateProgress');
             if (p) {
-                p.style.display = 'block';
+                setOnlineUpdateProgressVisible(true);
             }
         }, 50);
     } catch (e) {
@@ -11538,6 +12697,10 @@ function startUpdateProgressPolling() {
  */
 function updateUpdateProgress(data) {
     const updateStatus = document.getElementById('updateStatus');
+    const updateProgress = document.getElementById('updateProgress');
+    const updateProgressStage = document.getElementById('updateProgressStage');
+    const updateProgressUnits = document.getElementById('updateProgressUnits');
+    const updateProgressElapsed = document.getElementById('updateProgressElapsed');
     const updateProgressFill = document.getElementById('updateProgressFill');
     const updateProgressText = document.getElementById('updateProgressText');
     const updateProgressDetails = document.getElementById('updateProgressDetails');
@@ -11547,48 +12710,94 @@ function updateUpdateProgress(data) {
     }
     if (percent < 0) percent = 0;
     if (percent > 100) percent = 100;
-    const detail = data.detail || '';
+    const detail = localizeSecureUpdateDetail(data.detail || '');
+    if (!onlineUpdateStartedAt && !['idle', 'success', 'error'].includes(data.status)) {
+        resetOnlineUpdateProgress();
+    } else {
+        setOnlineUpdateProgressVisible(true);
+    }
+    if (data.status !== 'success' && data.status !== 'error') {
+        updateProgress.dataset.state = data.status === 'idle' ? 'waiting' : 'running';
+    }
     updateProgressFill.style.width = `${percent}%`;
     updateProgressText.textContent = `${percent}%`;
+    if (updateProgressElapsed) updateOnlineUpdateElapsed();
     if (data.status === 'idle') {
         // 空闲状态
         updateStatus.textContent = '准备就绪';
+        if (updateProgressStage) updateProgressStage.textContent = '等待开始';
+        if (updateProgressUnits) updateProgressUnits.textContent = '阶段 0/3';
         if (updateProgressDetails) updateProgressDetails.textContent = '等待开始...';
     } else if (data.status === 'authenticating') {
         // 设备认证中
         updateStatus.textContent = '设备认证中...';
+        if (updateProgressStage) updateProgressStage.textContent = '设备认证';
+        if (updateProgressUnits) updateProgressUnits.textContent = '阶段 1/3';
         if (updateProgressDetails) updateProgressDetails.textContent = detail || 'HMAC-SHA256认证中...';
     } else if (data.status === 'checking') {
         // 检查更新中
+        updateProgress.dataset.state = 'running';
         updateStatus.textContent = '检查更新中...';
+        if (updateProgressStage) updateProgressStage.textContent = '检查更新';
+        if (updateProgressUnits) updateProgressUnits.textContent = '阶段 1/3';
         if (updateProgressDetails) updateProgressDetails.textContent = detail || '正在连接服务器...';
     } else if (data.status === 'downloading') {
         // 下载中
-        updateStatus.textContent = '正在下载加密固件...';
+        const downloaded = Math.max(0, Number(data.downloaded) || 0);
+        const total = Math.max(0, Number(data.total) || 0);
+        const transferText = total > 0
+            ? `已下载并写入 ${downloaded}/${total} KB`
+            : `已下载并写入 ${downloaded} KB`;
+        updateStatus.textContent = '正在下载并写入固件...';
+        if (updateProgressStage) updateProgressStage.textContent = '下载固件';
+        if (updateProgressUnits) updateProgressUnits.textContent = total > 0 ? `${downloaded}/${total} KB` : `${downloaded} KB`;
         if (updateProgressDetails) {
-            updateProgressDetails.textContent = detail || `已下载 ${data.downloaded || 0}/${data.total || 0} KB`;
+            updateProgressDetails.textContent = transferText;
         } else {
-            updateStatus.textContent = `正在下载固件... ${data.downloaded || 0}/${data.total || 0} KB`;
+            updateStatus.textContent = `正在下载并写入固件... ${transferText}`;
         }
     } else if (data.status === 'decrypting') {
         // 固件数据处理中
         updateStatus.textContent = '正在解密固件...';
+        if (updateProgressStage) updateProgressStage.textContent = '处理固件';
+        if (updateProgressUnits) updateProgressUnits.textContent = '阶段 2/3';
         if (updateProgressDetails) updateProgressDetails.textContent = detail || 'AES-CTR解密 + SHA256校验...';
     } else if (data.status === 'writing') {
         // 写入Flash中
         updateStatus.textContent = '正在写入Flash...';
+        if (updateProgressStage) updateProgressStage.textContent = '写入固件';
+        if (updateProgressUnits) updateProgressUnits.textContent = '阶段 2/3';
         if (updateProgressDetails) updateProgressDetails.textContent = detail || '写入固件到存储器...';
     } else if (data.status === 'verifying') {
         // 校验中
         updateStatus.textContent = '正在校验固件...';
+        if (updateProgressStage) updateProgressStage.textContent = '校验固件';
+        if (updateProgressUnits) updateProgressUnits.textContent = '阶段 3/3';
         if (updateProgressDetails) updateProgressDetails.textContent = detail || '验证SHA256完整性...';
     } else if (data.status === 'success') {
         // 更新成功
         updateProgressFill.style.width = '100%';
         updateProgressText.textContent = '100%';
+        updateProgress.dataset.state = 'success';
+        if (updateProgressStage) updateProgressStage.textContent = data.readyToInstall ? '下载完成' : '更新完成';
+        if (updateProgressUnits) updateProgressUnits.textContent = '阶段 3/3';
+        if (data.readyToInstall) {
+            finishOnlineUpdateProgress();
+            updateStatus.textContent = '固件已下载并校验完成';
+            updateStatus.style.color = '#32d74b';
+            secureUpdateAvailableInfo = secureUpdateAvailableInfo || { version: data.version };
+            setOnlineUpdateAction('install');
+            if (updateProgressDetails) updateProgressDetails.textContent = detail || '固件已准备好，点击“开始安全更新”安装';
+            secureUpdateInProgress = false;
+            return;
+        }
         updateStatus.textContent = '✓ 更新成功！系统将在2秒后重启...';
         updateStatus.style.color = '#32d74b';
         if (updateProgressDetails) updateProgressDetails.textContent = detail || '固件校验通过，准备重启...';
+        finishOnlineUpdateProgress();
+        secureUpdateAvailableInfo = null;
+        secureUpdateInProgress = false;
+        setOnlineUpdateAction('check');
         showToast('更新成功，系统即将重启', 3000);
         if (updateProgressTimer) {
             clearInterval(updateProgressTimer);
@@ -11598,13 +12807,16 @@ function updateUpdateProgress(data) {
         // 更新失败
         updateStatus.textContent = '✗ 更新失败';
         updateStatus.style.color = '#ff453a';
+        updateProgress.dataset.state = 'error';
+        if (updateProgressStage) updateProgressStage.textContent = '更新失败';
+        finishOnlineUpdateProgress();
         if (updateProgressDetails) {
             updateProgressDetails.textContent = data.error || detail || '未知错误';
         } else {
             updateStatus.textContent = data.error || detail || '更新失败';
         }
-        document.getElementById('updateBtn').disabled = false;
-        document.getElementById('updateBtn').style.opacity = '1';
+        secureUpdateInProgress = false;
+        setOnlineUpdateAction('check');
         showToast(data.error || '更新失败', 3000);
         if (updateProgressTimer) {
             clearInterval(updateProgressTimer);
@@ -11708,13 +12920,47 @@ function confirmFormatAllBeforeManualUpdate(pmfwPath) {
 }
 
 function continueManualUpdateAfterDataWarning(pmfwPath, preserveUserData) {
+    sendMessage('system', 'manualUpdatePreflight', {}, (response) => {
+        if (!response || response.code !== 0) {
+            showToast('无法检查更新设备状态，请稍后重试', 3000);
+            return;
+        }
 
-    if (serialConnected) {
-        confirmEnterUpgradeModeBeforeManualUpdate(pmfwPath, preserveUserData);
-        return;
-    }
+        const state = response.data || {};
+        if (state.downloadModePresent) {
+            startManualUpdateTask(pmfwPath, preserveUserData, false);
+            return;
+        }
 
-    startManualUpdateTask(pmfwPath, preserveUserData, false);
+        if (state.serialConnected || serialConnected) {
+            const usbId = normalizeUsbId(state.usbId ?? currentUsbId);
+            if (usbId !== 0) {
+                showUsb0UpdateGuidance(pmfwPath, preserveUserData, usbId);
+                return;
+            }
+            confirmEnterUpgradeModeBeforeManualUpdate(pmfwPath, preserveUserData);
+            return;
+        }
+
+        startManualUpdateTask(pmfwPath, preserveUserData, false);
+    });
+}
+
+function showUsb0UpdateGuidance(pmfwPath, preserveUserData, usbId) {
+    const current = usbVersionLabel(usbId) || '未知 USB 端口';
+    showModal('请翻转 Type-C 接口', `
+        <div class="usb0-guidance">
+            <div class="usb0-guidance__current">当前串口连接：${current}，不是烧录所需的 USB0。</div>
+            <div class="usb0-guidance__steps">请拔出并翻转设备的 Type-C 插头后重新插入，等待状态栏 COM 口旁显示“USB1.1”，再点击“重新检测”。</div>
+        </div>
+    `, () => {
+        closeMainModal();
+        continueManualUpdateAfterDataWarning(pmfwPath, preserveUserData);
+        return false;
+    }, 'md');
+
+    const confirmBtn = document.getElementById('modalConfirm');
+    if (confirmBtn) confirmBtn.textContent = '重新检测';
 }
 
 function confirmEnterUpgradeModeBeforeManualUpdate(pmfwPath, preserveUserData) {
@@ -11891,6 +13137,7 @@ function handleManualUpdateProgress(data) {
 function localizeManualUpdateError(error) {
     const raw = String(error || '');
     console.error('[ManualUpdate] 原始错误:', raw);
+    if (/不是 USB0|翻转 Type-C/i.test(raw)) return '当前连接不是 USB0，请翻转 Type-C 插头，等待状态栏显示 USB1.1 后重试';
     if (/journal.*already completed/i.test(raw)) return '上次烧录记录已完成，请重新开始烧录';
     if (/another firmware update|recovery lease|already running/i.test(raw)) return '已有固件更新任务正在运行';
     if (/timeout|timed out|within 45 seconds/i.test(raw)) return '等待设备响应超时，请检查 USB 连接后重试';
@@ -12088,6 +13335,8 @@ function showUpdateAvailableDialog(updateInfo) {
     showModal('发现新版本固件', content, () => {
         // 用户确认更新
         showToast('开始下载固件更新...', 3000);
+        resetOnlineUpdateProgress();
+        renderSecureUpdateCheckProgress(0, '正在启动固件下载...', 'running');
         sendMessage('update', 'startDownload', {}, (response) => {
             if (response.code === 0) {
                 console.log('[Update] 下载已开始');
@@ -12095,6 +13344,8 @@ function showUpdateAvailableDialog(updateInfo) {
                 // 自动切到设置-更新页显示进度
                 focusUpdateSettingsPanel();
             } else {
+                finishOnlineUpdateProgress();
+                renderSecureUpdateCheckProgress(0, response.msg || '启动下载失败', 'error');
                 showToast('启动下载失败: ' + (response.msg || '未知错误'), 3000);
             }
         });
@@ -12207,11 +13458,22 @@ function sendRK628Command(action, data = null) {
         if (data) {
             commandData.data = data;
         }
-        sendMessage('panel', 'rk628Config', commandData, (response) => {
-            if (response.code === 0) {
-                resolve(response);
-            } else {
+        sendMessage('panel', 'rk628Config', commandData, async (response) => {
+            if (response.code !== 0) {
                 reject(response);
+                return;
+            }
+            const operationId = (response?.data?.accepted || response?.accepted)
+                ? (response?.data?.operationId || response?.operationId)
+                : '';
+            if (!operationId) {
+                resolve(response);
+                return;
+            }
+            try {
+                resolve(await waitForDeviceOperation(operationId, 45000));
+            } catch (error) {
+                reject(error);
             }
         });
     });
@@ -12223,22 +13485,174 @@ function sendRK628CommandWithTimeout(action, data = null, timeoutMs = 30000) {
         if (data) {
             commandData.data = data;
         }
-        sendMessageWithTimeout('panel', 'rk628Config', commandData, timeoutMs, (response) => {
-            if (response.code === 0) {
-                resolve(response);
-            } else {
+        sendMessageWithTimeout('panel', 'rk628Config', commandData, timeoutMs, async (response) => {
+            if (response.code !== 0) {
                 reject(response);
+                return;
+            }
+            const operationId = (response?.data?.accepted || response?.accepted)
+                ? (response?.data?.operationId || response?.operationId)
+                : '';
+            if (!operationId) {
+                resolve(response);
+                return;
+            }
+            try {
+                resolve(await waitForDeviceOperation(operationId, timeoutMs));
+            } catch (error) {
+                reject(error);
             }
         });
     });
 }
 
+const STATUS_LED_KEYS = ['handshake', 'noSignal', 'fido2', 'bluetooth',
+    'bluetoothSearch', 'ready', 'error'];
+const STATUS_LED_DEFAULTS = {
+    handshake: 4,
+    noSignal: 2,
+    fido2: 3,
+    bluetooth: 0,
+    bluetoothSearch: 7,
+    ready: 0,
+    error: 5,
+};
+let statusLedConfigState = { ...STATUS_LED_DEFAULTS };
+let statusLedConfigInFlight = false;
+
+function statusLedModeNormalize(value) {
+    const mode = Number(value);
+    return Number.isInteger(mode) && mode >= 0 && mode <= 8 ? mode : 0;
+}
+
+function statusLedConfigNormalize(data) {
+    const config = data?.config || data?.led_config || data || {};
+    return STATUS_LED_KEYS.reduce((result, key) => {
+        result[key] = statusLedModeNormalize(config[key]);
+        return result;
+    }, {});
+}
+
+function statusLedConfigSetStatus(text, tone = '') {
+    const status = document.getElementById('statusLedConfigStatus');
+    if (!status) return;
+    status.textContent = text;
+    status.classList.toggle('is-ready', tone === 'ready');
+    status.classList.toggle('is-busy', tone === 'busy');
+}
+
+function statusLedConfigRender() {
+    document.querySelectorAll('.status-led-select').forEach((select) => {
+        const key = select.dataset.ledState;
+        if (!STATUS_LED_KEYS.includes(key)) return;
+        select.value = String(statusLedConfigState[key]);
+        select.disabled = statusLedConfigInFlight;
+
+        const preview = document.querySelector(`[data-led-preview="${key}"]`);
+        if (!preview) return;
+        const mode = statusLedConfigState[key];
+        preview.classList.remove('is-on', 'is-breath', 'is-flash', 'is-heartbeat');
+        if (mode === 1) preview.classList.add('is-on');
+        else if (mode === 2) preview.classList.add('is-breath');
+        else if ([3, 4, 5, 6, 7].includes(mode)) preview.classList.add('is-flash');
+        else if (mode === 8) preview.classList.add('is-heartbeat');
+        preview.dataset.mode = String(mode);
+    });
+    const saveButton = document.getElementById('statusLedSaveButton');
+    const resetButton = document.getElementById('statusLedResetButton');
+    if (saveButton) saveButton.disabled = statusLedConfigInFlight;
+    if (resetButton) resetButton.disabled = statusLedConfigInFlight;
+}
+
+async function statusLedConfigLoad(silent = false) {
+    if (statusLedConfigInFlight) return;
+    statusLedConfigInFlight = true;
+    statusLedConfigSetStatus('读取中...', 'busy');
+    statusLedConfigRender();
+    try {
+        const response = await sendRK628CommandWithTimeout(28, null, 5000);
+        const data = response?.data || {};
+        if (data.supported === false) {
+            const error = new Error('当前下位机固件不支持状态指示灯配置');
+            error.unsupported = true;
+            throw error;
+        }
+        statusLedConfigState = statusLedConfigNormalize(data);
+        statusLedConfigSetStatus('已同步', 'ready');
+    } catch (error) {
+        statusLedConfigSetStatus(error?.unsupported ? '固件不支持' : '读取失败');
+        if (!silent) {
+            showToast('读取指示灯设置失败: ' + rk628ExtractErrorMessage(error), 'error');
+        }
+    } finally {
+        statusLedConfigInFlight = false;
+        statusLedConfigRender();
+    }
+}
+
+function statusLedConfigReadForm() {
+    return STATUS_LED_KEYS.reduce((result, key) => {
+        const select = document.querySelector(`.status-led-select[data-led-state="${key}"]`);
+        result[key] = select
+            ? statusLedModeNormalize(select.value)
+            : statusLedConfigState[key];
+        return result;
+    }, {});
+}
+
+async function statusLedConfigSave(config = statusLedConfigReadForm()) {
+    if (statusLedConfigInFlight) return false;
+    const previous = statusLedConfigState;
+    statusLedConfigState = { ...config };
+    statusLedConfigInFlight = true;
+    statusLedConfigSetStatus('保存中...', 'busy');
+    statusLedConfigRender();
+    try {
+        await sendRK628CommandWithTimeout(29, { ...statusLedConfigState, persist: 1 }, 6000);
+        statusLedConfigSetStatus('已保存', 'ready');
+        showToast('指示灯设置已保存', 'success');
+        return true;
+    } catch (error) {
+        statusLedConfigState = previous;
+        statusLedConfigSetStatus('保存失败');
+        showToast('保存指示灯设置失败: ' + rk628ExtractErrorMessage(error), 'error');
+        return false;
+    } finally {
+        statusLedConfigInFlight = false;
+        statusLedConfigRender();
+    }
+}
+
+function initStatusLedSetting() {
+    const selects = document.querySelectorAll('.status-led-select');
+    if (!selects.length || selects[0].dataset.bound === '1') return;
+    selects.forEach((select) => {
+        select.addEventListener('change', () => {
+            const key = select.dataset.ledState;
+            statusLedConfigState[key] = statusLedModeNormalize(select.value);
+            statusLedConfigRender();
+        });
+        select.dataset.bound = '1';
+    });
+    document.getElementById('statusLedSaveButton')?.addEventListener('click', () => {
+        statusLedConfigSave();
+    });
+    document.getElementById('statusLedResetButton')?.addEventListener('click', () => {
+        statusLedConfigState = { ...STATUS_LED_DEFAULTS };
+        statusLedConfigRender();
+        statusLedConfigSave();
+    });
+    statusLedConfigRender();
+}
+
 const RK628_SCALE_MODE_FULLSCREEN = 0;
 const RK628_SCALE_MODE_ASPECT_FIT = 1;
 let rk628ScaleModeState = {
-    mode: RK628_SCALE_MODE_ASPECT_FIT,
+    mode: RK628_SCALE_MODE_FULLSCREEN,
     inFlight: false,
     applySeq: null,
+    aspectSupported: true,
+    aspectError: '',
 };
 
 function rk628ScaleModeNormalize(value) {
@@ -12250,6 +13664,12 @@ function rk628ScaleModeNormalize(value) {
 function rk628ScaleModeRender() {
     const select = document.getElementById('displayScaleModeSelect');
     if (!select) return;
+    const aspectOption = select.querySelector(`option[value="${RK628_SCALE_MODE_ASPECT_FIT}"]`);
+    if (aspectOption) {
+        aspectOption.textContent = rk628ScaleModeState.aspectSupported
+            ? '等比缩放'
+            : '等比缩放（不支持）';
+    }
     select.value = String(rk628ScaleModeState.mode);
     select.disabled = rk628ScaleModeState.inFlight;
 }
@@ -12275,6 +13695,11 @@ function rk628ScaleModeReadState(data) {
         applyResult: hasApplyStatus ? Number(data.scale_apply_result) : null,
         persistResult: hasApplyStatus ? Number(data.scale_persist_result) : null,
         reapplyResult: hasApplyStatus ? Number(data.scale_reapply_result) : null,
+        aspectSupported: data?.scale_aspect_supported !== false &&
+            Number(data?.scale_aspect_supported) !== 0,
+        aspectError: typeof data?.scale_aspect_error === 'string'
+            ? data.scale_aspect_error
+            : '',
     };
 }
 
@@ -12315,6 +13740,8 @@ async function rk628ScaleModeLoad(silent = false) {
         const state = rk628ScaleModeReadState(result?.data);
         rk628ScaleModeState.mode = state.mode;
         rk628ScaleModeState.applySeq = state.applySeq;
+        rk628ScaleModeState.aspectSupported = state.aspectSupported;
+        rk628ScaleModeState.aspectError = state.aspectError;
     } catch (error) {
         if (error?.unsupported) {
             showToast(rk628ExtractErrorMessage(error), 'error');
@@ -12340,6 +13767,8 @@ async function rk628ScaleModeSave(mode) {
         const baseline = rk628ScaleModeReadState(baselineResult?.data);
         const previousSeq = baseline.applySeq;
         rk628ScaleModeState.applySeq = baseline.applySeq;
+        rk628ScaleModeState.aspectSupported = baseline.aspectSupported;
+        rk628ScaleModeState.aspectError = baseline.aspectError;
         await sendRK628CommandWithTimeout(24, {
             name: 'scale_mode',
             value: rk628ScaleModeState.mode,
@@ -12357,7 +13786,7 @@ async function rk628ScaleModeSave(mode) {
         }
     } catch (error) {
         rk628ScaleModeState.mode = previousMode;
-        showToast('保存缩放规则失败: ' + rk628ExtractErrorMessage(error), 'error');
+        showToast(rk628ExtractErrorMessage(error), 'error');
     } finally {
         rk628ScaleModeState.inFlight = false;
         rk628ScaleModeRender();
@@ -12394,24 +13823,35 @@ function rk628GetTabButton(tabName) {
 /**
  * 切换RK628标签页
  */
-function switchRK628Tab(tabName) {
-    // 切换标签按钮状态（使用统一的input-tab-button类）
+let rk628ActiveTab = 'edid';
+
+function switchRK628Tab(tabName, sourceButton = null) {
     const container = document.getElementById('page-rk628-config');
-    container.querySelectorAll('.input-tab-button').forEach(tab => {
-        tab.classList.remove('active');
-    });
-    const triggerButton = (typeof event !== 'undefined' && event && event.target && event.target.classList && event.target.classList.contains('input-tab-button'))
-        ? event.target
-        : rk628GetTabButton(tabName);
-    if (triggerButton) triggerButton.classList.add('active');
-    // 切换内容显示（使用统一的input-tab-content类）
-    container.querySelectorAll('.input-tab-content').forEach(content => {
-        content.classList.remove('active');
-    });
+    if (!container) return false;
 
     const quickTab = tabName === 'edid-tuning';
     const contentId = quickTab ? 'tab-edid-quick' : ('tab-' + tabName);
-    document.getElementById(contentId).classList.add('active');
+    const content = document.getElementById(contentId);
+    const triggerButton = sourceButton?.matches?.('[data-rk628-tab]')
+        ? sourceButton
+        : rk628GetTabButton(tabName);
+    if (!triggerButton || !content || !container.contains(content)) {
+        console.warn('[RK628] 无效的标签页:', tabName);
+        return false;
+    }
+
+    container.querySelectorAll('.rk628-config-tabsbar [data-rk628-tab]').forEach(tab => {
+        tab.classList.remove('active');
+        tab.setAttribute('aria-selected', 'false');
+    });
+    triggerButton.classList.add('active');
+    triggerButton.setAttribute('aria-selected', 'true');
+
+    Array.from(container.children).forEach(child => {
+        if (child.classList.contains('input-tab-content')) child.classList.remove('active');
+    });
+    content.classList.add('active');
+    rk628ActiveTab = tabName;
 
     // 快速切换页改为事件驱动：不轮询下位机状态
     if (quickTab) {
@@ -12429,6 +13869,18 @@ function switchRK628Tab(tabName) {
 	if (tabName === 'init-seq') {
 		try { rk628InitSeqOnOpen(); } catch (e) { /* ignore */ }
 	}
+    return true;
+}
+
+function ensureRK628TabState() {
+    const container = document.getElementById('page-rk628-config');
+    if (!container) return;
+    const selected = container.querySelector('.rk628-config-tabsbar [data-rk628-tab][aria-selected="true"]')
+        || container.querySelector('.rk628-config-tabsbar [data-rk628-tab].active');
+    const tabName = rk628GetTabButton(rk628ActiveTab)
+        ? rk628ActiveTab
+        : (selected?.dataset.rk628Tab || 'edid');
+    if (!switchRK628Tab(tabName)) switchRK628Tab('edid');
 }
 
 function switchRK628QuickView(tabName) {
@@ -12712,13 +14164,48 @@ function clearEdidHex() {
  */
 function updateEdidCharCount() {
     const edidHex = document.getElementById('edid-hex')?.value || '';
+    renderEdidHexDecorations(edidHex);
     updateEdidStatus(parseEdidHex(edidHex));
+}
+
+function renderEdidHexDecorations(hexText) {
+    const offsets = document.getElementById('edid-offsets');
+    const ascii = document.getElementById('edid-ascii');
+    if (!offsets || !ascii) return;
+
+    const compact = String(hexText || '').replace(/\s/g, '');
+    const offsetLines = [];
+    const asciiLines = [];
+    for (let row = 0; row < 16; row++) {
+        offsetLines.push(`0x${(row * 16).toString(16).toUpperCase().padStart(4, '0')}`);
+        let text = '';
+        for (let column = 0; column < 16; column++) {
+            const byteIndex = row * 16 + column;
+            const pair = compact.slice(byteIndex * 2, byteIndex * 2 + 2);
+            const value = /^[0-9a-fA-F]{2}$/.test(pair) ? parseInt(pair, 16) : -1;
+            text += value >= 0x20 && value <= 0x7E ? String.fromCharCode(value) : '.';
+        }
+        asciiLines.push(text);
+    }
+    offsets.textContent = offsetLines.join('\n');
+    ascii.textContent = asciiLines.join('\n');
+    syncEdidEditorScroll();
+}
+
+function syncEdidEditorScroll() {
+    const input = document.getElementById('edid-hex');
+    const offsets = document.getElementById('edid-offsets');
+    const ascii = document.getElementById('edid-ascii');
+    if (!input || !offsets || !ascii) return;
+    offsets.scrollTop = input.scrollTop;
+    ascii.scrollTop = input.scrollTop;
 }
 
 // 页面加载时初始化EDID编辑器
 document.addEventListener('DOMContentLoaded', function () {
     const edidInput = document.getElementById('edid-hex');
     if (edidInput) {
+        edidInput.addEventListener('scroll', syncEdidEditorScroll, { passive: true });
         updateEdidCharCount();
     }
 });
@@ -14072,6 +15559,7 @@ window.openPage = function (pageName, tabName) {
 
     // 打开 RK628 配置页时自动加载配置
     if (pageName === 'rk628-config') {
+        ensureRK628TabState();
         try {
             loadRK628Config();
         } catch (e) {
