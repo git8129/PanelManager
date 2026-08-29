@@ -293,7 +293,8 @@ namespace PanelManager.Models
         public string Port { get; set; } = string.Empty;
 
         [JsonPropertyName("baudRate")]
-        public int BaudRate { get; set; } = 115200;
+        // USB CDC 仅把该值作为 line coding 元数据；默认值按产品配置设为 3M。
+        public int BaudRate { get; set; } = 3_000_000;
 
         [JsonPropertyName("dataBits")]
         public int DataBits { get; set; } = 8;

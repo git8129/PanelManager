@@ -1,10 +1,13 @@
 ﻿using Fleck;
+using LibreHardwareMonitor.Hardware;
 using PanelManager.Models;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO.Ports;
 using System.Linq;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -17,7 +20,12 @@ namespace PanelManager.Services
         private readonly object _wsLock = new();
         private WebSocketServer? _wsServer;
         private SerialPort? _serialPort;
-        private readonly List<IWebSocketConnection> _webClients = new();
+        private readonly ConcurrentDictionary<IWebSocketConnection, byte> _webClients = new();
+        private readonly ConcurrentDictionary<IWebSocketConnection, CancellationTokenSource> _pendingFloatingClients = new();
+        private readonly ConcurrentDictionary<IWebSocketConnection, SemaphoreSlim> _webSendLocks = new();
+        private readonly object _floatingClientLock = new();
+        private byte[]? _floatingClientToken;
+        private IWebSocketConnection? _floatingClient;
         private readonly Dictionary<string, Func<Message, Task<Message>>> _hostHandlers = new();
         private string _serialBuffer = string.Empty;
         private const int SerialTxQueueCapacity = 64;
@@ -41,6 +49,9 @@ namespace PanelManager.Services
         private bool _performanceSubscribed = false;
         private System.Diagnostics.PerformanceCounter? _cpuCounter;
         private System.Diagnostics.PerformanceCounter? _ramCounter;
+        private Computer? _hardwareMonitor;
+        private bool _temperatureReadFailureLogged;
+        private bool _temperatureUnavailableLogged;
 
         // 自动重连控制
         private Timer? _autoReconnectTimer;
@@ -55,21 +66,92 @@ namespace PanelManager.Services
         private TaskCompletionSource<Message?>? _pendingChallenge;
         private TaskCompletionSource<Message?>? _pendingAuthentication;
         private System.Text.Json.JsonElement? _lastAuthChallengeData;
+        private int? _currentUsbId;
 
         private const string DeviceAuthProduct = "PanelLinkDevice";
         private const string DeviceAuthHost = "PanelLinkHost";
         private const string DeviceAuthSecret = "PanelLinkAuth:v1";
         private const string DeviceUsbVid = "3654";
         private static readonly string[] DeviceUsbPids = { "5B55", "4155", "5F55" };
+        private const string DownloadModeUsbKey = "VID_4C4A&PID_8057";
+        private const int ConfigManagerSuccess = 0;
         private const int AuthenticationRequestTimeoutMs = 4000;
         private const int UnauthenticatedSerialReconnectMs = 12000;
 
         public event Action<string>? OnLog;
         public event Action? OnWebSocketClientConnected;
         public event Action? OnWebSocketClientDisconnected;
+        public event Action? OnFloatingClientDisconnected;
         public bool IsSerialOpen => _serialPort?.IsOpen ?? false;
         public bool IsSerialConnected => IsSerialOpen && _deviceAuthenticated;
         public string? CurrentPort => _serialPort?.PortName;
+        public int? CurrentUsbId => IsSerialConnected ? _currentUsbId : null;
+
+        public bool HasFloatingClient
+        {
+            get
+            {
+                lock (_floatingClientLock)
+                {
+                    return _floatingClient != null;
+                }
+            }
+        }
+
+        public void PrepareFloatingClientSession(string token)
+        {
+            var tokenBytes = Convert.FromHexString(token);
+            IWebSocketConnection? previousClient;
+            lock (_floatingClientLock)
+            {
+                previousClient = _floatingClient;
+                _floatingClient = null;
+                _floatingClientToken = tokenBytes;
+            }
+
+            if (previousClient != null)
+            {
+                try { previousClient.Close(1008); } catch { }
+            }
+        }
+
+        public void ClearFloatingClientSession(string token)
+        {
+            byte[] tokenBytes;
+            try
+            {
+                tokenBytes = Convert.FromHexString(token);
+            }
+            catch (FormatException)
+            {
+                return;
+            }
+
+            IWebSocketConnection? client = null;
+            lock (_floatingClientLock)
+            {
+                if (_floatingClientToken == null ||
+                    !CryptographicOperations.FixedTimeEquals(tokenBytes, _floatingClientToken))
+                {
+                    return;
+                }
+
+                client = _floatingClient;
+                _floatingClient = null;
+                _floatingClientToken = null;
+            }
+
+            if (client != null)
+            {
+                try { client.Close(1000); } catch { }
+            }
+        }
+
+        [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+        private static extern int CM_Locate_DevNodeW(
+            out uint deviceInstance,
+            string deviceId,
+            uint flags);
 
         #region 启动/停止
 
@@ -90,31 +172,66 @@ namespace PanelManager.Services
                     {
                         socket.OnOpen = () =>
                         {
-                            if (!string.Equals(
-                                    socket.ConnectionInfo.Origin?.TrimEnd('/'),
-                                    "https://0.0.0.1",
-                                    StringComparison.OrdinalIgnoreCase))
+                            var origin = socket.ConnectionInfo.Origin?.TrimEnd('/');
+                            if (string.Equals(origin, "https://0.0.0.1", StringComparison.OrdinalIgnoreCase))
                             {
-                                Log($"[WS] 拒绝非受信源: {socket.ConnectionInfo.Origin ?? "<none>"}");
-                                socket.Close(1008);
+                                _webClients.TryAdd(socket, 0);
+                                Log($"[WS] 客户端连接: {socket.ConnectionInfo.ClientIpAddress}");
+
+                                var status = GetStatus();
+                                _ = SendWebMessageAsync(
+                                    socket,
+                                    Message.Event(Target.Host, Module.System, "status", status).ToJson());
+
+                                try { OnWebSocketClientConnected?.Invoke(); } catch { }
                                 return;
                             }
-                            _webClients.Add(socket);
-                            Log($"[WS] 客户端连接: {socket.ConnectionInfo.ClientIpAddress}");
 
-                            // 发送当前状态
-                            var status = GetStatus();
-                            socket.Send(Message.Event(Target.Host, Module.System, "status", status).ToJson());
+                            if (string.IsNullOrEmpty(origin) && HasPendingFloatingClientSession())
+                            {
+                                var timeout = new CancellationTokenSource();
+                                if (_pendingFloatingClients.TryAdd(socket, timeout))
+                                {
+                                    Log("[WS] 悬浮窗连接等待认证");
+                                    _ = CloseUnauthenticatedFloatingClientAsync(socket, timeout.Token);
+                                    return;
+                                }
+                                timeout.Dispose();
+                            }
 
-                            // 通知外部：有客户端连接（用于悬浮窗重发 show 等）
-                            try { OnWebSocketClientConnected?.Invoke(); } catch { }
+                            Log($"[WS] 拒绝非受信源: {socket.ConnectionInfo.Origin ?? "<none>"}");
+                            socket.Close(1008);
                         };
 
                         socket.OnClose = () =>
                         {
-                            _webClients.Remove(socket);
+                            var wasWebClient = _webClients.TryRemove(socket, out _);
+                            if (_pendingFloatingClients.TryRemove(socket, out var pendingTimeout))
+                            {
+                                pendingTimeout.Cancel();
+                                pendingTimeout.Dispose();
+                            }
+
+                            var wasFloatingClient = false;
+                            lock (_floatingClientLock)
+                            {
+                                if (ReferenceEquals(_floatingClient, socket))
+                                {
+                                    _floatingClient = null;
+                                    wasFloatingClient = true;
+                                }
+                            }
+
+                            _webSendLocks.TryRemove(socket, out _);
                             Log($"[WS] 客户端断开: {socket.ConnectionInfo.ClientIpAddress}");
-                            try { OnWebSocketClientDisconnected?.Invoke(); } catch { }
+                            if (wasWebClient)
+                            {
+                                try { OnWebSocketClientDisconnected?.Invoke(); } catch { }
+                            }
+                            if (wasFloatingClient)
+                            {
+                                try { OnFloatingClientDisconnected?.Invoke(); } catch { }
+                            }
                         };
 
                         socket.OnMessage = async msg => await HandleWebMessage(socket, msg);
@@ -131,12 +248,39 @@ namespace PanelManager.Services
             }
         }
 
+        private bool HasPendingFloatingClientSession()
+        {
+            lock (_floatingClientLock)
+            {
+                return _floatingClientToken != null;
+            }
+        }
+
+        private async Task CloseUnauthenticatedFloatingClientAsync(
+            IWebSocketConnection socket,
+            CancellationToken cancellationToken)
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(5), cancellationToken);
+                if (_pendingFloatingClients.ContainsKey(socket))
+                {
+                    Log("[WS] 悬浮窗认证超时");
+                    socket.Close(1008);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }
+
         public bool OpenSerial(SerialConfig config)
         {
             try
             {
                 CloseSerial();
                 _deviceAuthenticated = false;
+                _currentUsbId = null;
 
                 _serialPort = new SerialPort
                 {
@@ -222,6 +366,8 @@ namespace PanelManager.Services
                 _pendingAuthentication?.TrySetResult(null);
                 _pendingAuthentication = null;
                 _lastAuthChallengeData = null;
+                _currentUsbId = null;
+                CompletePendingDeviceRequests();
 
                 Log($"[Serial] 已关闭: {port}");
                 BroadcastEvent(Module.Serial, "closed", null);
@@ -236,6 +382,18 @@ namespace PanelManager.Services
             _wsServer?.Dispose();
             _wsServer = null;
             _webClients.Clear();
+            foreach (var timeout in _pendingFloatingClients.Values)
+            {
+                timeout.Cancel();
+                timeout.Dispose();
+            }
+            _pendingFloatingClients.Clear();
+            _webSendLocks.Clear();
+            lock (_floatingClientLock)
+            {
+                _floatingClient = null;
+                _floatingClientToken = null;
+            }
             Log("[System] 服务已停止");
         }
 
@@ -331,6 +489,38 @@ namespace PanelManager.Services
 
             return DeviceUsbPids.Any(pid =>
                 upper.Contains($"PID_{pid}", StringComparison.Ordinal));
+        }
+
+        public bool HasDownloadModeDevice()
+        {
+            try
+            {
+                using var usbRoot = Registry.LocalMachine.OpenSubKey(
+                    @"SYSTEM\CurrentControlSet\Enum\USB");
+                if (usbRoot == null) return false;
+
+                var deviceKeyName = usbRoot.GetSubKeyNames().FirstOrDefault(name =>
+                    string.Equals(name, DownloadModeUsbKey,
+                        StringComparison.OrdinalIgnoreCase));
+                if (deviceKeyName == null) return false;
+
+                using var deviceKey = usbRoot.OpenSubKey(deviceKeyName);
+                if (deviceKey == null) return false;
+                foreach (var instance in deviceKey.GetSubKeyNames())
+                {
+                    var deviceId = $@"USB\{deviceKeyName}\{instance}";
+                    if (CM_Locate_DevNodeW(out _, deviceId, 0) ==
+                        ConfigManagerSuccess)
+                    {
+                        return true;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"[Update] 检测下载态设备失败: {ex.Message}");
+            }
+            return false;
         }
 
         private async Task AutoReconnectCheck()
@@ -596,7 +786,12 @@ namespace PanelManager.Services
                 _deviceAuthenticated = true;
                 _lastConnectedPort = _serialPort.PortName;
                 Log($"[Serial] 设备主动认证成功: {_serialPort.PortName}");
-                BroadcastEvent(Module.Serial, "connected", new { port = _serialPort.PortName, auth = challenge.Data });
+                BroadcastEvent(Module.Serial, "connected", new
+                {
+                    port = _serialPort.PortName,
+                    usbId = CurrentUsbId,
+                    auth = challenge.Data
+                });
             }
         }
 
@@ -675,7 +870,12 @@ namespace PanelManager.Services
             if (!wasAuthenticated)
             {
                 Log($"[Serial] 设备认证成功: {_serialPort.PortName}");
-                BroadcastEvent(Module.Serial, "connected", new { port = _serialPort.PortName, auth = _lastAuthChallengeData });
+                BroadcastEvent(Module.Serial, "connected", new
+                {
+                    port = _serialPort.PortName,
+                    usbId = CurrentUsbId,
+                    auth = _lastAuthChallengeData
+                });
             }
         }
 
@@ -690,6 +890,20 @@ namespace PanelManager.Services
 
             challenge = value.GetString() ?? string.Empty;
             return !string.IsNullOrWhiteSpace(challenge);
+        }
+
+        private void UpdateUsbIdFromChallenge(Message msg)
+        {
+            _currentUsbId = null;
+            if (msg.Data is not { } data ||
+                data.ValueKind != System.Text.Json.JsonValueKind.Object ||
+                !data.TryGetProperty("usbId", out var value) ||
+                value.ValueKind != System.Text.Json.JsonValueKind.Number ||
+                !value.TryGetInt32(out var usbId) || usbId is < 0 or > 1)
+            {
+                return;
+            }
+            _currentUsbId = usbId;
         }
 
         private static string ComputeAuthKey(string challenge)
@@ -788,6 +1002,22 @@ namespace PanelManager.Services
                 // 第一次调用 CPU 计数器（需要预热）
                 _cpuCounter.NextValue();
 
+                try
+                {
+                    _hardwareMonitor = new Computer
+                    {
+                        IsCpuEnabled = true
+                    };
+                    _hardwareMonitor.Open();
+                    Log("[Performance] LibreHardwareMonitor CPU 温度采集已启用");
+                }
+                catch (Exception ex)
+                {
+                    _hardwareMonitor?.Close();
+                    _hardwareMonitor = null;
+                    Log($"[Performance] LibreHardwareMonitor 初始化失败，温度将显示为 N/A: {ex.Message}");
+                }
+
                 // 初始化网络监控基准值
                 _lastTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 GetCurrentNetworkStats(out _lastBytesSent, out _lastBytesReceived);
@@ -816,6 +1046,11 @@ namespace PanelManager.Services
 
             _ramCounter?.Dispose();
             _ramCounter = null;
+
+            _hardwareMonitor?.Close();
+            _hardwareMonitor = null;
+            _temperatureReadFailureLogged = false;
+            _temperatureUnavailableLogged = false;
 
             Log("[Performance] 性能监控已停止");
         }
@@ -852,8 +1087,7 @@ namespace PanelManager.Services
                 }
                 catch { }
 
-                // 获取温度（Windows 一般需要 WMI 或第三方库，这里设为 0 表示不可用）
-                double temperature = 0;
+                double temperature = ReadCpuTemperature();
 
                 // 获取网络速度（合并到性能监控中）
                 long uploadSpeed = 0;
@@ -905,6 +1139,65 @@ namespace PanelManager.Services
             }
         }
 
+        private double ReadCpuTemperature()
+        {
+            if (_hardwareMonitor == null)
+            {
+                return 0;
+            }
+
+            try
+            {
+                var candidates = new List<(string Name, double Value)>();
+                foreach (var hardware in _hardwareMonitor.Hardware.Where(item => item.HardwareType == HardwareType.Cpu))
+                {
+                    hardware.Update();
+                    foreach (var sensor in hardware.Sensors)
+                    {
+                        if (sensor.SensorType == SensorType.Temperature
+                            && sensor.Value is float value
+                            && value > 0
+                            && value < 150)
+                        {
+                            candidates.Add((sensor.Name, value));
+                        }
+                    }
+                }
+
+                if (candidates.Count == 0)
+                {
+                    if (!_temperatureUnavailableLogged)
+                    {
+                        _temperatureUnavailableLogged = true;
+                        Log("[Performance] LibreHardwareMonitor 未返回有效 CPU 温度；部分硬件需要管理员权限访问底层传感器");
+                    }
+                    return 0;
+                }
+
+                var preferredNames = new[] { "CPU Package", "Tctl/Tdie", "CPU (Tctl/Tdie)", "Core Max" };
+                foreach (var preferredName in preferredNames)
+                {
+                    var preferred = candidates.FirstOrDefault(candidate =>
+                        candidate.Name.Contains(preferredName, StringComparison.OrdinalIgnoreCase));
+                    if (preferred.Value > 0)
+                    {
+                        return Math.Round(preferred.Value, 1);
+                    }
+                }
+
+                return Math.Round(candidates.Max(candidate => candidate.Value), 1);
+            }
+            catch (Exception ex)
+            {
+                if (!_temperatureReadFailureLogged)
+                {
+                    _temperatureReadFailureLogged = true;
+                    Log($"[Performance] CPU 温度读取失败，温度将显示为 N/A: {ex.Message}");
+                }
+                return 0;
+            }
+        }
+
         #endregion
 
         #region 消息处理
@@ -914,32 +1207,162 @@ namespace PanelManager.Services
             var msg = Message.FromJson(raw);
             if (msg == null)
             {
-                await socket.Send(new Message { Code = ErrorCode.InvalidRequest, Msg = "Invalid JSON" }.ToJson());
+                await SendWebMessageAsync(
+                    socket,
+                    new Message { Code = ErrorCode.InvalidRequest, Msg = "Invalid JSON" }.ToJson());
+                return;
+            }
+
+            if (_pendingFloatingClients.ContainsKey(socket))
+            {
+                if (!TryAuthenticateFloatingClient(socket, msg))
+                {
+                    Log("[WS] 拒绝无效悬浮窗认证");
+                    await SendWebMessageAsync(
+                        socket,
+                        msg.Fail(ErrorCode.InvalidRequest, "Floating client authentication failed").ToJson());
+                    socket.Close(1008);
+                    return;
+                }
+
+                Log("[WS] 悬浮窗客户端已认证");
+                var readyResponse = await HandleHostMessage(msg);
+                await SendWebMessageAsync(socket, readyResponse.ToJson());
+                return;
+            }
+
+            if (IsFloatingClient(socket))
+            {
+                if (!IsAllowedFloatingCommand(msg))
+                {
+                    Log($"[WS] 拒绝悬浮窗越权请求: {msg.Module}/{msg.Cmd}");
+                    await SendWebMessageAsync(
+                        socket,
+                        msg.Fail(ErrorCode.InvalidRequest, "Command is not allowed for floating client").ToJson());
+                    return;
+                }
+
+                var floatingResponse = await HandleHostMessage(msg);
+                await SendWebMessageAsync(socket, floatingResponse.ToJson());
+                return;
+            }
+
+            if (!_webClients.ContainsKey(socket))
+            {
+                socket.Close(1008);
                 return;
             }
 
             // 根据目标路由
             if (msg.Target == Target.Host)
             {
+                if (IsFloatingOnlyCommand(msg))
+                {
+                    await SendWebMessageAsync(
+                        socket,
+                        msg.Fail(ErrorCode.InvalidRequest, "Command is reserved for floating client").ToJson());
+                    return;
+                }
                 if (!PanelManagerHostCapability.Matches(msg.HostCapability))
                 {
                     Log($"[WS] 拒绝未授权Host请求: {msg.Module}/{msg.Cmd}");
-                    await socket.Send(msg.Fail(ErrorCode.InvalidRequest, "Host capability is missing or invalid").ToJson());
+                    await SendWebMessageAsync(
+                        socket,
+                        msg.Fail(ErrorCode.InvalidRequest, "Host capability is missing or invalid").ToJson());
                     return;
                 }
                 Log($"[WS] Host请求: {msg.Module}/{msg.Cmd} id={msg.Id}");
                 // 发给上位机
                 var response = await HandleHostMessage(msg);
-                await socket.Send(response.ToJson());
+                await SendWebMessageAsync(socket, response.ToJson());
             }
             else if (msg.Target == Target.Device)
             {
                 // 转发给下位机
                 if (!SendToDevice(raw))
                 {
-                    await socket.Send(msg.Fail(ErrorCode.SerialNotOpen, "Serial port not open").ToJson());
+                    await SendWebMessageAsync(
+                        socket,
+                        msg.Fail(ErrorCode.SerialNotOpen, "Serial port not open").ToJson());
                 }
             }
+        }
+
+        private bool TryAuthenticateFloatingClient(IWebSocketConnection socket, Message msg)
+        {
+            if (msg.Target != Target.Host ||
+                msg.Type != MsgType.Request ||
+                msg.Module != Module.System ||
+                !string.Equals(msg.Cmd, "floatingReady", StringComparison.Ordinal) ||
+                msg.Data is not { } data ||
+                !data.TryGetProperty("token", out var tokenProperty) ||
+                tokenProperty.ValueKind != System.Text.Json.JsonValueKind.String ||
+                !data.TryGetProperty("parentPid", out var parentPidProperty) ||
+                !parentPidProperty.TryGetInt32(out var parentPid) ||
+                parentPid != Environment.ProcessId)
+            {
+                return false;
+            }
+
+            var token = tokenProperty.GetString();
+            byte[] suppliedToken;
+            try
+            {
+                suppliedToken = token == null ? Array.Empty<byte>() : Convert.FromHexString(token);
+            }
+            catch (FormatException)
+            {
+                return false;
+            }
+
+            IWebSocketConnection? previousClient;
+            lock (_floatingClientLock)
+            {
+                if (_floatingClientToken == null ||
+                    suppliedToken.Length != _floatingClientToken.Length ||
+                    !CryptographicOperations.FixedTimeEquals(suppliedToken, _floatingClientToken))
+                {
+                    return false;
+                }
+
+                previousClient = _floatingClient;
+                _floatingClient = socket;
+            }
+
+            if (_pendingFloatingClients.TryRemove(socket, out var timeout))
+            {
+                timeout.Cancel();
+                timeout.Dispose();
+            }
+
+            if (previousClient != null && !ReferenceEquals(previousClient, socket))
+            {
+                try { previousClient.Close(1008); } catch { }
+            }
+
+            return true;
+        }
+
+        private bool IsFloatingClient(IWebSocketConnection socket)
+        {
+            lock (_floatingClientLock)
+            {
+                return ReferenceEquals(_floatingClient, socket);
+            }
+        }
+
+        private static bool IsAllowedFloatingCommand(Message msg)
+        {
+            return msg.Target == Target.Host &&
+                msg.Type == MsgType.Request &&
+                msg.Module == Module.System &&
+                msg.Cmd is "floatingVisible" or "floatingRestore" or "floatingExitAll";
+        }
+
+        private static bool IsFloatingOnlyCommand(Message msg)
+        {
+            return msg.Module == Module.System &&
+                msg.Cmd is "floatingReady" or "floatingVisible" or "floatingRestore" or "floatingExitAll";
         }
 
         private async Task<Message> HandleHostMessage(Message msg)
@@ -1061,10 +1484,23 @@ namespace PanelManager.Services
                 _pendingAuthentication?.TrySetResult(null);
                 _pendingAuthentication = null;
                 _lastAuthChallengeData = null;
+                _currentUsbId = null;
+                CompletePendingDeviceRequests();
             }
 
             Log($"[Serial] 串口异常断开，等待自动重连: {portName} ({ex.Message})");
             BroadcastEvent(Module.Serial, "disconnected", new { port = portName, reason = ex.Message });
+        }
+
+        private void CompletePendingDeviceRequests()
+        {
+            foreach (var item in _pendingResponses.ToArray())
+            {
+                if (_pendingResponses.TryRemove(item.Key, out var pending))
+                {
+                    pending.TrySetResult(null);
+                }
+            }
         }
 
         private void ProcessSerialData(string data)
@@ -1096,6 +1532,7 @@ namespace PanelManager.Services
                         if (isChallenge)
                         {
                             _lastAuthChallengeData = msg.Data;
+                            UpdateUsbIdFromChallenge(msg);
                             if (_pendingChallenge != null)
                             {
                                 _pendingChallenge.TrySetResult(msg);
@@ -1318,16 +1755,57 @@ namespace PanelManager.Services
 
         public void BroadcastToWeb(string json)
         {
-            foreach (var client in _webClients.ToList())
+            foreach (var client in _webClients.Keys)
             {
-                try
-                {
-                    client.Send(json);
-                }
-                catch (Exception ex)
-                {
-                    Log($"[WS] 广播失败: {ex.Message}");
-                }
+                _ = SendWebMessageAsync(client, json);
+            }
+        }
+
+        public async Task<bool> SendFloatingEventAsync(Module module, string cmd, object? data)
+        {
+            IWebSocketConnection? client;
+            lock (_floatingClientLock)
+            {
+                client = _floatingClient;
+            }
+
+            if (client == null)
+            {
+                return false;
+            }
+
+            var message = Message.Event(Target.Host, module, cmd, data).ToJson();
+            return await SendWebMessageAsync(client, message);
+        }
+
+        private async Task<bool> SendWebMessageAsync(IWebSocketConnection socket, string json)
+        {
+            var sendLock = _webSendLocks.GetOrAdd(socket, static _ => new SemaphoreSlim(1, 1));
+            if (!await sendLock.WaitAsync(TimeSpan.FromSeconds(3)))
+            {
+                Log("[WS] 发送队列等待超时");
+                try { socket.Close(1011); } catch { }
+                return false;
+            }
+            try
+            {
+                await socket.Send(json).WaitAsync(TimeSpan.FromSeconds(3));
+                return true;
+            }
+            catch (TimeoutException)
+            {
+                Log("[WS] 发送超时");
+                try { socket.Close(1011); } catch { }
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Log($"[WS] 发送失败: {ex.Message}");
+                return false;
+            }
+            finally
+            {
+                sendLock.Release();
             }
         }
 
@@ -1385,6 +1863,7 @@ namespace PanelManager.Services
                     open = IsSerialConnected,
                     physicalOpen = IsSerialOpen,
                     port = CurrentPort,
+                    usbId = CurrentUsbId,
                     authenticated = _deviceAuthenticated
                 },
                 version = "1.0.0",
