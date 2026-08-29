@@ -1,4 +1,82 @@
 window.UIApps = (() => {
+    function bindDockGestures(dockApp, app, handlers) {
+        const { onDelete, onLaunch } = handlers;
+        let pressTimer = null;
+        let pointerId = null;
+        let pressStart = null;
+        let deleteIndicator = null;
+        let gestureCancelled = false;
+        let longPressTriggered = false;
+
+        const clearPress = (animate = true) => {
+            if (pressTimer) {
+                clearTimeout(pressTimer);
+                pressTimer = null;
+            }
+            if (deleteIndicator) {
+                const indicator = deleteIndicator;
+                deleteIndicator = null;
+                indicator.classList.remove('show');
+                if (animate) {
+                    setTimeout(() => indicator.remove(), 200);
+                } else {
+                    indicator.remove();
+                }
+            }
+            pointerId = null;
+            pressStart = null;
+            dockApp.classList.remove('is-delete-press');
+        };
+
+        dockApp.addEventListener('pointerdown', (event) => {
+            if (event.button !== 0) return;
+            if (event.target.closest('.dock-app-delete')) return;
+
+            clearPress(false);
+            gestureCancelled = false;
+            longPressTriggered = false;
+            pointerId = event.pointerId;
+            pressStart = { x: event.clientX, y: event.clientY };
+            dockApp.classList.add('is-delete-press');
+            dockApp.setPointerCapture?.(event.pointerId);
+
+            deleteIndicator = document.createElement('div');
+            deleteIndicator.className = 'dock-delete-indicator';
+            deleteIndicator.textContent = '🗑️';
+            dockApp.appendChild(deleteIndicator);
+            requestAnimationFrame(() => deleteIndicator?.classList.add('show'));
+
+            pressTimer = setTimeout(() => {
+                longPressTriggered = true;
+                navigator.vibrate?.(25);
+                clearPress(false);
+                onDelete(app.id);
+            }, 1200);
+        });
+
+        dockApp.addEventListener('pointermove', (event) => {
+            if (event.pointerId !== pointerId || !pressStart) return;
+            if (Math.hypot(event.clientX - pressStart.x, event.clientY - pressStart.y) > 14) {
+                gestureCancelled = true;
+                clearPress();
+            }
+        });
+
+        dockApp.addEventListener('pointerup', (event) => {
+            if (event.target.closest('.dock-app-delete')) return;
+            const shouldLaunch = !gestureCancelled && !longPressTriggered;
+            clearPress();
+            if (shouldLaunch) onLaunch(app);
+        });
+        dockApp.addEventListener('pointercancel', clearPress);
+        dockApp.addEventListener('lostpointercapture', clearPress);
+        dockApp.addEventListener('contextmenu', (event) => event.preventDefault());
+        dockApp.addEventListener('click', (event) => {
+            if (event.target.closest('.dock-app-delete')) return;
+            event.preventDefault();
+        });
+    }
+
     function renderDock(dockApps, applications, handlers) {
         const { onDelete, onLaunch } = handlers;
         if (!dockApps) return;
@@ -9,11 +87,7 @@ window.UIApps = (() => {
             if (window.UIComponents?.renderDockApp) {
                 window.UIComponents.renderDockApp(dockApp, app, () => onDelete(app.id));
             }
-            dockApp.addEventListener('click', (event) => {
-                if (!event.target.classList.contains('dock-app-delete')) {
-                    onLaunch(app);
-                }
-            });
+            bindDockGestures(dockApp, app, { onDelete, onLaunch });
             dockApps.appendChild(dockApp);
         });
     }
@@ -30,7 +104,7 @@ window.UIApps = (() => {
         systemApps.forEach((app) => {
             const isInDock = applications.some((a) => a.id === app.id);
             const item = document.createElement('div');
-            item.className = 'app-list-item';
+            item.className = 'app-list-item ui-list-item';
             if (window.UIComponents?.renderAppListItem) {
                 window.UIComponents.renderAppListItem(item, app, isInDock, () => onToggle(app.id));
             }

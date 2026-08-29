@@ -42,6 +42,60 @@ window.UIComponents = (() => {
         return el;
     }
 
+    function getWifiSignalMeta(value) {
+        const rssi = Number(value);
+        if (!Number.isFinite(rssi) || rssi >= 0) {
+            return { level: 0, label: '未知', rssi: null };
+        }
+        if (rssi >= -50) return { level: 5, label: '极佳', rssi };
+        if (rssi >= -60) return { level: 4, label: '很好', rssi };
+        if (rssi >= -70) return { level: 3, label: '良好', rssi };
+        if (rssi >= -80) return { level: 2, label: '一般', rssi };
+        return { level: 1, label: '较弱', rssi };
+    }
+
+    function createWifiSignalIndicator(value, variant = 'list') {
+        const indicator = document.createElement('div');
+        indicator.className = `wifi-signal-indicator wifi-signal-${variant}`;
+
+        const bars = document.createElement('div');
+        bars.className = 'wifi-signal-bars';
+        bars.setAttribute('role', 'img');
+        for (let index = 1; index <= 5; index++) {
+            const bar = document.createElement('span');
+            bar.className = 'wifi-signal-bar';
+            bars.appendChild(bar);
+        }
+        indicator.appendChild(bars);
+
+        const copy = document.createElement('div');
+        copy.className = 'wifi-signal-copy';
+        copy.appendChild(createText('span', 'wifi-signal-quality', ''));
+        copy.appendChild(createText('span', 'wifi-signal-rssi', ''));
+        indicator.appendChild(copy);
+        updateWifiSignalIndicator(indicator, value);
+        return indicator;
+    }
+
+    function updateWifiSignalIndicator(indicator, value) {
+        const signal = getWifiSignalMeta(value);
+        for (let level = 0; level <= 5; level++) {
+            indicator.classList.toggle(`wifi-signal-level-${level}`, level === signal.level);
+        }
+        const bars = indicator.querySelector('.wifi-signal-bars');
+        bars?.setAttribute('aria-label', signal.rssi === null
+            ? '信号强度未知'
+            : `信号${signal.label}，${signal.rssi} dBm`);
+        bars?.querySelectorAll('.wifi-signal-bar').forEach((bar, index) => {
+            bar.classList.toggle('active', index < signal.level);
+        });
+        const quality = indicator.querySelector('.wifi-signal-quality');
+        const rssi = indicator.querySelector('.wifi-signal-rssi');
+        if (quality) quality.textContent = signal.label;
+        if (rssi) rssi.textContent = signal.rssi === null ? '-- dBm' : `${signal.rssi} dBm`;
+        indicator.title = signal.rssi === null ? '信号强度未知' : `${signal.label} · ${signal.rssi} dBm`;
+    }
+
     function renderDockApp(dockApp, app, onDelete) {
         dockApp.replaceChildren();
 
@@ -58,6 +112,8 @@ window.UIComponents = (() => {
         const delBtn = document.createElement('button');
         delBtn.className = 'dock-app-delete';
         delBtn.type = 'button';
+        delBtn.setAttribute('aria-label', `从 Dock 移除 ${safeText(app.name)}`);
+        delBtn.title = '从 Dock 移除';
         delBtn.addEventListener('click', (event) => {
             event.stopPropagation();
             onDelete();
@@ -67,6 +123,7 @@ window.UIComponents = (() => {
 
     function renderAppListItem(item, app, isInDock, onToggle) {
         item.replaceChildren();
+        item.classList.add('ui-list-item');
 
         if (app.icon) {
             const img = document.createElement('img');
@@ -128,65 +185,121 @@ window.UIComponents = (() => {
     }
 
     function renderWifiListItem(item, options) {
-        const { network, isConnected, onDetails, onForget, onConnect, getSecurityIcon, getRssiSignal } = options;
-        item.replaceChildren();
-
-        item.appendChild(createText('div', 'icon-md', getSecurityIcon(network.security)));
-
-        const info = document.createElement('div');
-        info.className = 'device-info';
-        info.appendChild(createText('div', 'device-name', `${safeText(network.ssid)}${isConnected ? ' ✓' : ''}`));
-        info.appendChild(createText('div', 'text-muted', isConnected ? '已连接' : network.security === 'open' ? '开放网络' : '需要密码'));
-        item.appendChild(info);
-
-        item.appendChild(createText('div', 'status-icon', getRssiSignal(network.rssi)));
-
-        const actions = document.createElement('div');
-        actions.className = 'device-actions';
-
-        if (isConnected) {
-            const detailBtn = createText('button', 'btn-base btn-sm btn-primary', '详情');
-            detailBtn.type = 'button';
-            detailBtn.addEventListener('click', (event) => {
-                event.stopPropagation();
-                onDetails();
-            });
-            actions.appendChild(detailBtn);
-
-            const forgetBtn = createText('button', 'btn-base btn-sm btn-danger', '忘记');
-            forgetBtn.type = 'button';
-            forgetBtn.addEventListener('click', (event) => {
-                event.stopPropagation();
-                onForget();
-            });
-            actions.appendChild(forgetBtn);
-        } else {
-            const connectBtn = createText('button', 'btn-base btn-sm btn-success', '连接');
-            connectBtn.type = 'button';
-            connectBtn.addEventListener('click', (event) => {
-                event.stopPropagation();
-                onConnect();
-            });
-            actions.appendChild(connectBtn);
+        const {
+            network,
+            isConnected,
+            isConnecting = false,
+            isWaitingForScan = false,
+            isSaved = false,
+            connectionFailure = null,
+            connectDisabled = false,
+            onDetails,
+            onDisconnect,
+            onConnect,
+            getSecurityIcon
+        } = options;
+        item.classList.add('ui-list-item');
+        let refs = item._wifiRefs;
+        if (!refs) {
+            const icon = createText('div', 'icon-md', '');
+            const info = document.createElement('div');
+            info.className = 'device-info';
+            const name = createText('div', 'device-name', '');
+            const meta = createText('div', 'text-muted', '');
+            info.appendChild(name);
+            info.appendChild(meta);
+            const actions = document.createElement('div');
+            actions.className = 'device-actions';
+            item.appendChild(icon);
+            item.appendChild(info);
+            item.appendChild(actions);
+            refs = { icon, name, meta, actions, signal: null, actionMode: '' };
+            item._wifiRefs = refs;
         }
 
-        item.appendChild(actions);
+        refs.icon.textContent = getSecurityIcon(network.security);
+        refs.name.textContent = `${safeText(network.ssid)}${isConnected ? ' ✓' : ''}`;
+        refs.meta.textContent = isConnected
+            ? '已连接'
+            : isWaitingForScan
+                ? '等待扫描完成...'
+                : isConnecting
+                ? '正在连接...'
+                : connectionFailure
+                    ? `连接失败：${safeText(connectionFailure)}`
+                : isSaved
+                    ? (network.rssi === null || network.rssi === undefined ? '无信号' : '未连接')
+                    : network.security === 'open' ? '开放网络' : '需要密码';
+
+        if (!refs.signal) {
+            refs.signal = createWifiSignalIndicator(network.rssi);
+            refs.actions.before(refs.signal);
+        } else {
+            updateWifiSignalIndicator(refs.signal, network.rssi);
+        }
+        if (isSaved && !isConnected && (network.rssi === null || network.rssi === undefined)) {
+            const bars = refs.signal.querySelector('.wifi-signal-bars');
+            const quality = refs.signal.querySelector('.wifi-signal-quality');
+            if (bars) bars.setAttribute('aria-label', '无信号');
+            if (quality) quality.textContent = '无信号';
+            refs.signal.title = '无信号';
+        }
+
+        const actionMode = isConnected ? 'connected' : 'available';
+        if (refs.actionMode !== actionMode) {
+            refs.actions.replaceChildren();
+            if (isConnected) {
+                const detailBtn = createText('button', 'btn-base btn-sm btn-primary', '详情');
+                detailBtn.type = 'button';
+                detailBtn.addEventListener('click', (event) => {
+                    event.stopPropagation();
+                    item._wifiActions.onDetails();
+                });
+                const disconnectBtn = createText('button', 'btn-base btn-sm btn-danger', '断开');
+                disconnectBtn.type = 'button';
+                disconnectBtn.addEventListener('click', (event) => {
+                    event.stopPropagation();
+                    item._wifiActions.onDisconnect();
+                });
+                refs.actions.appendChild(detailBtn);
+                refs.actions.appendChild(disconnectBtn);
+            } else {
+                const connectBtn = createText('button', 'btn-base btn-sm btn-success', '连接');
+                connectBtn.type = 'button';
+                connectBtn.dataset.action = 'connect';
+                connectBtn.addEventListener('click', (event) => {
+                    event.stopPropagation();
+                    item._wifiActions.onConnect();
+                });
+                refs.actions.appendChild(connectBtn);
+            }
+            refs.actionMode = actionMode;
+        }
+        if (!isConnected) {
+            const connectBtn = refs.actions.querySelector('[data-action="connect"]');
+            if (connectBtn) {
+                connectBtn.disabled = Boolean(connectDisabled);
+                connectBtn.textContent = isWaitingForScan
+                    ? '等待扫描...'
+                    : isConnecting ? '连接中...' : '连接';
+            }
+        }
+        item.classList.toggle('is-connecting', isConnecting);
+        item._wifiActions = { onDetails, onDisconnect, onConnect };
     }
 
     function createLabeledInput(labelText, inputId, value, options = {}) {
         const wrap = document.createElement('div');
+        wrap.className = 'ui-field';
         const label = document.createElement('label');
-        label.style.display = 'block';
-        label.style.marginBottom = '6px';
-        label.style.fontWeight = '600';
+        label.className = 'ui-field-label';
         label.textContent = labelText;
         wrap.appendChild(label);
 
         const input = document.createElement('input');
         input.type = options.type || 'text';
         input.id = inputId;
-        input.className = 'input-base control-md';
-        input.style.width = '100%';
+        input.className = 'ui-input input-base control-md';
         if (options.placeholder) input.placeholder = options.placeholder;
         if (options.disabled) input.disabled = true;
         if (options.monospace) input.style.fontFamily = 'SF Mono, monospace';
@@ -198,9 +311,7 @@ window.UIComponents = (() => {
 
     function buildWifiPasswordModal(ssid) {
         const root = document.createElement('div');
-        root.style.display = 'flex';
-        root.style.flexDirection = 'column';
-        root.style.gap = '14px';
+        root.className = 'ui-stack';
         root.appendChild(createLabeledInput('网络名称', 'wifiSsidReadonly', ssid, { disabled: true }));
         root.appendChild(createLabeledInput('密码', 'wifiPassword', '', { type: 'password', placeholder: '输入WiFi密码' }));
         return root;
@@ -209,54 +320,32 @@ window.UIComponents = (() => {
     function buildWifiDetailsModal(data) {
         const { ssid, status, ipConfig, useDhcp } = data;
         const root = document.createElement('div');
-        root.style.display = 'flex';
-        root.style.flexDirection = 'column';
-        root.style.gap = '16px';
+        root.className = 'ui-stack';
 
         const top = document.createElement('div');
-        top.style.textAlign = 'center';
-        top.style.padding = '12px';
-        top.style.background = 'rgba(10, 132, 255, 0.1)';
-        top.style.borderRadius = '12px';
-        top.appendChild(createText('div', '', '📶')).style.fontSize = '32px';
-        top.lastChild.style.marginBottom = '8px';
-        const title = createText('div', '', ssid);
-        title.style.fontWeight = '600';
-        title.style.fontSize = '18px';
+        top.className = 'wifi-details-hero';
+        top.appendChild(createWifiSignalIndicator(status.rssi, 'detail'));
+        const title = createText('div', 'wifi-details-title', ssid);
         top.appendChild(title);
-        const sub = createText('div', '', `信号强度: ${status.rssi ? data.getRssiSignal(status.rssi) : 'N/A'}${status.channel ? ` · 信道 ${status.channel}` : ''}`);
-        sub.style.color = 'var(--text-secondary)';
-        sub.style.fontSize = '14px';
-        sub.style.marginTop = '4px';
-        top.appendChild(sub);
+        if (status.channel) {
+            top.appendChild(createText('div', 'wifi-details-channel', `信道 ${status.channel}`));
+        }
         root.appendChild(top);
 
         const cfg = document.createElement('div');
-        cfg.style.background = 'var(--bg-hover)';
-        cfg.style.borderRadius = '12px';
-        cfg.style.padding = '16px';
+        cfg.className = 'ui-section';
         const cfgHead = document.createElement('div');
-        cfgHead.style.fontWeight = '600';
-        cfgHead.style.marginBottom = '12px';
-        cfgHead.style.display = 'flex';
-        cfgHead.style.alignItems = 'center';
-        cfgHead.style.gap = '8px';
+        cfgHead.className = 'ui-inline ui-section-title';
         cfgHead.appendChild(createText('span', '', '🌐'));
         cfgHead.appendChild(createText('span', '', '网络配置'));
-        const badge = createText('span', '', useDhcp ? 'DHCP 自动' : '静态 IP');
+        const badge = createText('span', 'ui-status ui-status--info', useDhcp ? 'DHCP 自动' : '静态 IP');
         badge.id = 'dhcpStatusBadge';
         badge.style.marginLeft = 'auto';
-        badge.style.fontSize = '13px';
-        badge.style.padding = '4px 10px';
-        badge.style.background = 'rgba(10, 132, 255, 0.2)';
-        badge.style.borderRadius = '6px';
-        badge.style.color = 'var(--accent-blue)';
         cfgHead.appendChild(badge);
         cfg.appendChild(cfgHead);
 
         const grid = document.createElement('div');
-        grid.style.display = 'grid';
-        grid.style.gap = '12px';
+        grid.className = 'ui-stack';
         grid.appendChild(createLabeledInput('IP 地址', 'wifiIpAddress', ipConfig.ip || status.ip || '', { disabled: useDhcp, monospace: true, opacity: useDhcp ? '0.6' : '1' }));
         grid.appendChild(createLabeledInput('子网掩码', 'wifiSubnetMask', ipConfig.netmask || status.netmask || '255.255.255.0', { disabled: useDhcp, monospace: true, opacity: useDhcp ? '0.6' : '1' }));
         grid.appendChild(createLabeledInput('网关', 'wifiGateway', ipConfig.gateway || status.gateway || '', { disabled: useDhcp, monospace: true, opacity: useDhcp ? '0.6' : '1' }));
@@ -264,20 +353,15 @@ window.UIComponents = (() => {
         root.appendChild(cfg);
 
         const dhcpBox = document.createElement('div');
-        dhcpBox.style.background = 'var(--bg-hover)';
-        dhcpBox.style.borderRadius = '12px';
-        dhcpBox.style.padding = '16px';
+        dhcpBox.className = 'ui-section';
         const dhcpLabel = document.createElement('label');
-        dhcpLabel.style.display = 'flex';
-        dhcpLabel.style.alignItems = 'center';
-        dhcpLabel.style.gap = '12px';
+        dhcpLabel.className = 'ui-inline';
         dhcpLabel.style.cursor = 'pointer';
         const dhcpInput = document.createElement('input');
         dhcpInput.type = 'checkbox';
         dhcpInput.id = 'wifiDhcpToggle';
         dhcpInput.checked = !!useDhcp;
-        dhcpInput.style.width = '20px';
-        dhcpInput.style.height = '20px';
+        dhcpInput.className = 'ui-check';
         dhcpInput.style.cursor = 'pointer';
         dhcpInput.addEventListener('change', () => {
             if (typeof window.toggleWifiDhcpMode === 'function') window.toggleWifiDhcpMode();
@@ -285,69 +369,52 @@ window.UIComponents = (() => {
         dhcpLabel.appendChild(dhcpInput);
         const dhcpText = document.createElement('div');
         const dhcpTitle = createText('div', '', '使用 DHCP 自动获取');
-        dhcpTitle.style.fontWeight = '600';
+        dhcpTitle.className = 'ui-field-label';
         dhcpText.appendChild(dhcpTitle);
         const dhcpDesc = createText('div', '', '启用后将自动配置 IP、子网掩码和网关');
-        dhcpDesc.style.color = 'var(--text-secondary)';
-        dhcpDesc.style.fontSize = '13px';
-        dhcpDesc.style.marginTop = '2px';
+        dhcpDesc.className = 'ui-section-description';
         dhcpText.appendChild(dhcpDesc);
         dhcpLabel.appendChild(dhcpText);
         dhcpBox.appendChild(dhcpLabel);
         root.appendChild(dhcpBox);
 
+        const danger = document.createElement('div');
+        danger.className = 'ui-section';
+        const deleteBtn = createText('button', 'btn-base btn-sm btn-danger', '删除网络');
+        deleteBtn.type = 'button';
+        deleteBtn.id = 'wifiDeleteNetworkBtn';
+        danger.appendChild(deleteBtn);
+        root.appendChild(danger);
+
         return root;
     }
 
     function buildBluetoothPairingModal(data) {
-        const { deviceIcon, name, addr, pairingCode } = data;
+        const { deviceIcon, name, pairingCode } = data;
         const root = document.createElement('div');
-        root.style.textAlign = 'center';
+        root.className = 'ui-modal-stack';
 
         const intro = document.createElement('div');
-        intro.style.marginBottom = '16px';
-        const icon = createText('div', '', deviceIcon);
-        icon.style.fontSize = '48px';
-        icon.style.marginBottom = '12px';
+        intro.className = 'ui-modal-intro';
+        const icon = createText('div', 'ui-modal-icon', deviceIcon);
         intro.appendChild(icon);
-        const title = createText('div', '', name);
-        title.style.fontSize = '18px';
-        title.style.fontWeight = '600';
-        title.style.marginBottom = '8px';
+        const title = createText('div', 'ui-modal-title', name);
         intro.appendChild(title);
-        const desc = createText('div', '', '请确认要连接此设备');
-        desc.style.color = 'var(--text-secondary)';
-        desc.style.fontSize = '15px';
+        const desc = createText('div', 'ui-modal-description', '请确认两台设备显示的配对码一致');
         intro.appendChild(desc);
         root.appendChild(intro);
 
-        const addrBox = document.createElement('div');
-        addrBox.style.background = 'rgba(10, 132, 255, 0.15)';
-        addrBox.style.padding = '20px';
-        addrBox.style.borderRadius = '12px';
-        addrBox.style.margin = '20px 0';
-        const addrLabel = createText('div', '', '设备地址');
-        addrLabel.style.color = 'var(--text-secondary)';
-        addrLabel.style.fontSize = '14px';
-        addrLabel.style.marginBottom = '8px';
-        addrBox.appendChild(addrLabel);
-        const addrValue = createText('div', '', addr);
-        addrValue.style.fontSize = '18px';
-        addrValue.style.fontWeight = '600';
-        addrValue.style.letterSpacing = '2px';
-        addrValue.style.color = 'var(--accent-blue)';
-        addrBox.appendChild(addrValue);
-        root.appendChild(addrBox);
+        const codeBox = document.createElement('div');
+        codeBox.className = 'ui-pairing-code-box';
+        const codeLabel = createText('div', 'ui-pairing-code-label', '配对码');
+        codeBox.appendChild(codeLabel);
+        const codeValue = createText('div', 'ui-pairing-code-value', pairingCode);
+        codeBox.appendChild(codeValue);
+        root.appendChild(codeBox);
 
         const note = document.createElement('div');
-        note.style.color = 'var(--text-secondary)';
-        note.style.fontSize = '14px';
-        note.appendChild(document.createTextNode('如果设备需要配对码，请在设备上确认'));
-        note.appendChild(document.createElement('br'));
-        note.appendChild(document.createTextNode('某些设备可能显示配对码: '));
-        const strong = document.createElement('strong');
-        strong.textContent = safeText(pairingCode);
-        note.appendChild(strong);
+        note.className = 'ui-modal-note';
+        note.textContent = '配对完成前请保持另一台设备处于配对界面';
         root.appendChild(note);
         return root;
     }
@@ -365,7 +432,8 @@ window.UIComponents = (() => {
             <div class="note-list-item ${note.id === currentNoteId ? 'active' : ''}"
                  data-note-id="${escapeHtml(note.id)}">
                 <div class="note-list-item-title">${escapeHtml(note.title || '无标题笔记')}</div>
-                <div class="note-list-item-delete" data-note-delete="${escapeHtml(note.id)}">🗑️</div>
+                <button class="note-list-item-delete" type="button" aria-label="删除笔记"
+                    data-note-delete="${escapeHtml(note.id)}"><span aria-hidden="true">🗑️</span></button>
                 <div class="note-list-item-preview">${escapeHtml(preview || '空笔记')}</div>
                 <div class="note-list-item-date">${escapeHtml(date)}</div>
             </div>
@@ -374,14 +442,72 @@ window.UIComponents = (() => {
 
     function createEmojiPreviewImage(src) {
         const imgContainer = document.createElement('div');
-        imgContainer.style.cssText = 'position: relative; aspect-ratio: 1; border-radius: 8px; overflow: hidden; background: rgba(60,60,65,0.5); border: 1px solid rgba(255,255,255,0.1);';
+        imgContainer.className = 'ui-image-tile';
         const img = document.createElement('img');
         img.src = safeText(src);
-        img.style.width = '100%';
-        img.style.height = '100%';
-        img.style.objectFit = 'cover';
         imgContainer.appendChild(img);
         return imgContainer;
+    }
+
+    function createButton({ label, icon = '', variant = 'secondary', size = 'md', type = 'button', disabled = false, onClick } = {}) {
+        const button = document.createElement('button');
+        const variants = new Set(['secondary', 'primary', 'success', 'warning', 'danger', 'ghost']);
+        const sizes = new Set(['sm', 'md', 'lg']);
+        const safeVariant = variants.has(variant) ? variant : 'secondary';
+        const safeSize = sizes.has(size) ? size : 'md';
+        button.type = type;
+        button.className = `ui-button ui-button--${safeVariant} ui-button--${safeSize}`;
+        button.disabled = Boolean(disabled);
+
+        if (icon) {
+            const iconElement = document.createElement('span');
+            iconElement.className = 'ui-button__icon';
+            iconElement.setAttribute('aria-hidden', 'true');
+            iconElement.textContent = safeText(icon);
+            button.appendChild(iconElement);
+        }
+
+        const labelElement = document.createElement('span');
+        labelElement.textContent = safeText(label);
+        button.appendChild(labelElement);
+        if (typeof onClick === 'function') button.addEventListener('click', onClick);
+        return button;
+    }
+
+    function createStatusBadge({ label, tone = 'neutral' } = {}) {
+        const status = document.createElement('span');
+        const tones = new Set(['neutral', 'info', 'success', 'warning', 'danger']);
+        const safeTone = tones.has(tone) ? tone : 'neutral';
+        status.className = `ui-status${safeTone === 'neutral' ? '' : ` ui-status--${safeTone}`}`;
+        status.textContent = safeText(label);
+        return status;
+    }
+
+    function createEmptyState({ title, description = '', icon = '' } = {}) {
+        const emptyState = document.createElement('div');
+        emptyState.className = 'ui-empty-state';
+
+        if (icon) {
+            const iconElement = document.createElement('div');
+            iconElement.className = 'ui-empty-state__icon';
+            iconElement.setAttribute('aria-hidden', 'true');
+            iconElement.textContent = safeText(icon);
+            emptyState.appendChild(iconElement);
+        }
+
+        const titleElement = document.createElement('div');
+        titleElement.className = 'ui-empty-state__title';
+        titleElement.textContent = safeText(title);
+        emptyState.appendChild(titleElement);
+
+        if (description) {
+            const descriptionElement = document.createElement('div');
+            descriptionElement.className = 'ui-section-description';
+            descriptionElement.textContent = safeText(description);
+            emptyState.appendChild(descriptionElement);
+        }
+
+        return emptyState;
     }
 
     function renderPhoneContactItem(contact) {
@@ -415,6 +541,8 @@ window.UIComponents = (() => {
         escapeHtml,
         stripHtmlTags,
         setModalBodyContent,
+        getWifiSignalMeta,
+        createWifiSignalIndicator,
         renderDockApp,
         renderAppListItem,
         renderShortcutCard,
@@ -424,6 +552,9 @@ window.UIComponents = (() => {
         buildBluetoothPairingModal,
         renderNoteListItem,
         createEmojiPreviewImage,
+        createButton,
+        createStatusBadge,
+        createEmptyState,
         renderPhoneContactItem,
         renderPhoneHistoryItem,
     };
