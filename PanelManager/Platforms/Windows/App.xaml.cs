@@ -15,7 +15,11 @@ namespace PanelManager.WinUI
     public partial class App : MauiWinUIApplication
     {
         private const string SingleInstanceMutexName = "Local\\PanelManager.SingleInstance";
+        // The primary process owns UI recovery; duplicate launches must signal it instead of exiting silently.
+        private const string SecondLaunchEventName = "Local\\PanelManager.SecondLaunch";
         private static Mutex? _singleInstanceMutex;
+        private static EventWaitHandle? _secondLaunchEvent;
+        private static int _secondLaunchListenerStarted;
 
         private static AppWindow? _appWindow;
         private static IntPtr _hwnd;
@@ -109,13 +113,21 @@ namespace PanelManager.WinUI
             _singleInstanceMutex = new Mutex(initiallyOwned: true, name: SingleInstanceMutexName, createdNew: out createdNew);
             if (!createdNew)
             {
+                SignalExistingInstance();
                 Environment.Exit(0);
             }
+
+            _secondLaunchEvent = new EventWaitHandle(
+                initialState: false,
+                mode: EventResetMode.AutoReset,
+                name: SecondLaunchEventName);
 
             AppDomain.CurrentDomain.ProcessExit += (_, __) =>
             {
                 try
                 {
+                    _secondLaunchEvent?.Dispose();
+                    _secondLaunchEvent = null;
                     _singleInstanceMutex?.ReleaseMutex();
                     _singleInstanceMutex?.Dispose();
                     _singleInstanceMutex = null;
@@ -125,6 +137,23 @@ namespace PanelManager.WinUI
                     // 忽略
                 }
             };
+        }
+
+        private static void SignalExistingInstance()
+        {
+            for (var attempt = 0; attempt < 10; attempt++)
+            {
+                try
+                {
+                    using var signal = EventWaitHandle.OpenExisting(SecondLaunchEventName);
+                    signal.Set();
+                    return;
+                }
+                catch (WaitHandleCannotBeOpenedException)
+                {
+                    Thread.Sleep(50);
+                }
+            }
         }
 
         protected override MauiApp CreateMauiApp() => MauiProgram.CreateMauiApp();
@@ -185,6 +214,7 @@ namespace PanelManager.WinUI
                     SubclassWindow(_hwnd);
 
                     EnsureWindowVisibleOnTop(currentWindow);
+                    StartSecondLaunchListener();
                 }
             }
             catch (Exception ex)
@@ -205,6 +235,50 @@ namespace PanelManager.WinUI
             catch
             {
                 // ignore
+            }
+        }
+
+        private static void StartSecondLaunchListener()
+        {
+            var signal = _secondLaunchEvent;
+            if (signal == null || Interlocked.Exchange(ref _secondLaunchListenerStarted, 1) != 0)
+            {
+                return;
+            }
+
+            _ = Task.Run(async () =>
+            {
+                while (true)
+                {
+                    try
+                    {
+                        signal.WaitOne();
+                        await RestoreMainWindowAfterSecondLaunchAsync();
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        return;
+                    }
+                    catch (Exception ex)
+                    {
+                        try { CrashLog.Write("SecondLaunch", ex); } catch { }
+                    }
+                }
+            });
+        }
+
+        private static async Task RestoreMainWindowAfterSecondLaunchAsync()
+        {
+            var services = Microsoft.Maui.Controls.Application.Current?.Handler?.MauiContext?.Services;
+            var floatingManager = services?.GetService<PanelManager.Services.FloatingWindowManager>();
+            if (floatingManager != null)
+            {
+                await floatingManager.RestoreFromFloatingAsync();
+            }
+
+            if (_mainWindow != null)
+            {
+                await MainThread.InvokeOnMainThreadAsync(() => EnsureWindowVisibleOnTop(_mainWindow));
             }
         }
 
