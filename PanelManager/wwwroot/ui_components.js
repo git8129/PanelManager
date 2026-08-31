@@ -338,7 +338,7 @@ window.UIComponents = (() => {
         cfgHead.className = 'ui-inline ui-section-title';
         cfgHead.appendChild(createText('span', '', '🌐'));
         cfgHead.appendChild(createText('span', '', '网络配置'));
-        const badge = createText('span', 'ui-status ui-status--info', useDhcp ? 'DHCP 自动' : '静态 IP');
+        const badge = createText('span', 'ui-status ui-status--info', useDhcp ? 'DHCP 自动' : '静态 IP（当前连接）');
         badge.id = 'dhcpStatusBadge';
         badge.style.marginLeft = 'auto';
         cfgHead.appendChild(badge);
@@ -510,32 +510,6 @@ window.UIComponents = (() => {
         return emptyState;
     }
 
-    function renderPhoneContactItem(contact) {
-        return `
-            <div class="phone-contact-item" data-phone-number="${escapeHtml(contact.number)}">
-                <div class="phone-contact-avatar">${escapeHtml(contact.avatar || safeText(contact.name).charAt(0))}</div>
-                <div class="phone-contact-info">
-                    <div class="phone-contact-name">${escapeHtml(contact.name)}</div>
-                    <div class="phone-contact-number">${escapeHtml(contact.number)}</div>
-                </div>
-                <div class="phone-contact-action">📞</div>
-            </div>
-        `;
-    }
-
-    function renderPhoneHistoryItem(call, getIcon) {
-        return `
-            <div class="phone-history-item" data-phone-number="${escapeHtml(call.number)}">
-                <div class="phone-history-icon ${escapeHtml(call.type)}">${escapeHtml(getIcon(call.type))}</div>
-                <div class="phone-history-info">
-                    <div class="phone-history-name">${escapeHtml(call.name)}</div>
-                    <div class="phone-history-details">${escapeHtml(call.duration || '未接通')}</div>
-                </div>
-                <div class="phone-history-time">${escapeHtml(call.time)}</div>
-            </div>
-        `;
-    }
-
     return {
         safeText,
         escapeHtml,
@@ -555,7 +529,5 @@ window.UIComponents = (() => {
         createButton,
         createStatusBadge,
         createEmptyState,
-        renderPhoneContactItem,
-        renderPhoneHistoryItem,
     };
 })();

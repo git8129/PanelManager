@@ -425,12 +425,6 @@
                             <div class="widget-icon">🍅</div>
                             <div class="widget-label">番茄钟</div>
                         </div>
-                        <!-- 蓝牙电话 Widget (2x2) -->
-                        <!-- <div class="widget glass-lg w-2 h-2 icon-widget" style="grid-column: 9 / 11; grid-row: 7 / 9;"
-                            onclick="openBluetoothPhone()">
-                            <div class="widget-icon">📞</div>
-                            <div class="widget-label">蓝牙电话</div>
-                        </div> -->
                         <!-- 计算器 (2x2) -->
                         <div class="widget glass-lg w-2 h-2 icon-widget" style="grid-column: 13 / 15; grid-row: 7 / 9;"
                             onclick="openCalculator()">
@@ -468,139 +462,6 @@
             <span class="indicator active" onclick="goToPage(0)"></span>
             <span class="indicator" onclick="goToPage(1)"></span>
         </div>
-        <!-- 蓝牙电话页面 -->
-        <div class="detail-page glass-xl-md" id="page-bluetooth-phone">
-            <div class="page-header">
-                <button class="btn-base btn-glass btn-inline" onclick="closePage()">← 返回</button>
-                <h2 class="page-title">蓝牙电话</h2>
-            </div>
-            <div class="page-content">
-                <div class="bt-phone-container">
-                    <!-- 左侧：通讯录和通话记录 -->
-                    <div class="phone-left-panel">
-                        <!-- 标签切换 -->
-                        <div class="phone-tabs">
-                            <button class="phone-tab active" onclick="switchPhoneTab('keypad')">
-                                <span class="phone-tab-icon">⌨️</span>
-                                <span class="phone-tab-label">拨号</span>
-                            </button>
-                            <button class="phone-tab" onclick="switchPhoneTab('contacts')">
-                                <span class="phone-tab-icon">👤</span>
-                                <span class="phone-tab-label">通讯录</span>
-                            </button>
-                            <button class="phone-tab" onclick="switchPhoneTab('history')">
-                                <span class="phone-tab-icon">🕐</span>
-                                <span class="phone-tab-label">记录</span>
-                            </button>
-                        </div>
-
-                        <!-- 通讯录内容 -->
-                        <div class="phone-tab-content" id="phoneTabContacts" style="display: none;">
-                            <div class="phone-search">
-                                <input type="text" class="input-base input-md" placeholder="搜索联系人..."
-                                    id="contactSearchInput" oninput="searchContacts()">
-                            </div>
-                            <div class="phone-contact-list" id="phoneContactList">
-                                <!-- 联系人将由JS动态生成 -->
-                            </div>
-                        </div>
-
-                        <!-- 通话记录内容 -->
-                        <div class="phone-tab-content" id="phoneTabHistory" style="display: none;">
-                            <div class="phone-history-filters">
-                                <button class="phone-filter-btn active" onclick="filterCallHistory('all')">全部</button>
-                                <button class="phone-filter-btn" onclick="filterCallHistory('missed')">未接</button>
-                                <button class="phone-filter-btn" onclick="filterCallHistory('incoming')">已接</button>
-                                <button class="phone-filter-btn" onclick="filterCallHistory('outgoing')">已拨</button>
-                            </div>
-                            <div class="phone-history-list" id="phoneHistoryList">
-                                <!-- 通话记录将由JS动态生成 -->
-                            </div>
-                        </div>
-
-                        <!-- 拨号界面内容(默认显示) -->
-                        <div class="phone-tab-content active" id="phoneTabKeypad">
-                            <div class="phone-display-area">
-                                <!-- 蓝牙状态 -->
-                                <div class="phone-bt-status" id="phoneBtStatus">
-                                    <span class="phone-bt-icon">🔵</span>
-                                    <span id="phoneBtStatusText">蓝牙未连接</span>
-                                </div>
-
-                                <!-- 号码显示 -->
-                                <div class="phone-number-display empty" id="phoneNumberDisplay">输入电话号码</div>
-
-                                <!-- 通话状态 -->
-                                <div class="phone-call-status" id="phoneCallStatus"></div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- 右侧：拨号键盘 -->
-                    <div class="phone-right-panel">
-                        <!-- 拨号键盘 -->
-                        <div class="phone-keypad">
-                            <button class="btn-base btn-glass btn-circle" onclick="phoneAddDigit('1')">1</button>
-                            <button class="btn-base btn-glass btn-circle" onclick="phoneAddDigit('2')">
-                                2<span class="phone-letters">ABC</span>
-                            </button>
-                            <button class="btn-base btn-glass btn-circle" onclick="phoneAddDigit('3')">
-                                3<span class="phone-letters">DEF</span>
-                            </button>
-
-                            <button class="btn-base btn-glass btn-circle" onclick="phoneAddDigit('4')">
-                                4<span class="phone-letters">GHI</span>
-                            </button>
-                            <button class="btn-base btn-glass btn-circle" onclick="phoneAddDigit('5')">
-                                5<span class="phone-letters">JKL</span>
-                            </button>
-                            <button class="btn-base btn-glass btn-circle" onclick="phoneAddDigit('6')">
-                                6<span class="phone-letters">MNO</span>
-                            </button>
-
-                            <button class="btn-base btn-glass btn-circle" onclick="phoneAddDigit('7')">
-                                7<span class="phone-letters">PQRS</span>
-                            </button>
-                            <button class="btn-base btn-glass btn-circle" onclick="phoneAddDigit('8')">
-                                8<span class="phone-letters">TUV</span>
-                            </button>
-                            <button class="btn-base btn-glass btn-circle" onclick="phoneAddDigit('9')">
-                                9<span class="phone-letters">WXYZ</span>
-                            </button>
-
-                            <button class="btn-base btn-glass btn-circle" onclick="phoneAddDigit('*')">*</button>
-                            <button class="btn-base btn-glass btn-circle" onclick="phoneAddDigit('0')">
-                                0<span class="phone-letters">+</span>
-                            </button>
-                            <button class="btn-base btn-glass btn-circle" onclick="phoneAddDigit('#')">#</button>
-
-                            <!-- 第五行:空 / 呼叫 / 删除 -->
-                            <button class="btn-base" style="display: none;"></button>
-                            <button class="btn-base btn-glass btn-circle" id="phoneCallBtn"
-                                onclick="phoneCall()">📞</button>
-                            <button class="btn-base btn-glass phone-key-delete" onclick="phoneDeleteDigit()">⌫</button>
-                        </div>
-
-                        <!-- 通话中的操作按钮(默认隐藏) -->
-                        <div class="phone-call-actions" id="phoneCallActions" style="display: none;">
-                            <div class="phone-action-btn" id="phoneMuteBtn" onclick="phoneToggleMute()">
-                                <span class="phone-action-icon">🔇</span>
-                                <span class="phone-action-label">静音</span>
-                            </div>
-                            <div class="phone-action-btn" id="phoneSpeakerBtn" onclick="phoneToggleSpeaker()">
-                                <span class="phone-action-icon">🔊</span>
-                                <span class="phone-action-label">扬声器</span>
-                            </div>
-                            <div class="phone-action-btn" onclick="phoneShowKeypad()">
-                                <span class="phone-action-icon">⌨️</span>
-                                <span class="phone-action-label">键盘</span>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-
         <!-- 计算器页面 -->
         <div class="detail-page glass-xl-md" id="page-calculator">
             <div class="page-header">
@@ -2418,7 +2279,6 @@
         window.Fengari = window.module.exports;
     </script>
     <script src="ui_components.js"></script>
-    <script src="ui_phone.js"></script>
     <script src="ui_shortcuts.js"></script>
     <script src="ui_apps.js"></script>
     <script src="ui_misc.js"></script>

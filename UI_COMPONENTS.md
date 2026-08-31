@@ -108,7 +108,7 @@ const empty = UIComponents.createEmptyState({
 });
 ```
 
-现有 Wi-Fi、应用列表、快捷键、电话列表构造器继续保留原函数名，并通过 `.ui-list-item`、`.ui-input`、`.ui-stack` 等组件类接入统一视觉层。
+现有 Wi-Fi、应用列表、快捷键构造器继续保留原函数名，并通过 `.ui-list-item`、`.ui-input`、`.ui-stack` 等组件类接入统一视觉层。
 
 ## 旧类适配表
 
@@ -117,7 +117,7 @@ const empty = UIComponents.createEmptyState({
 | `.btn-base`、`.btn-tonal`、`.btn-glass` | Button | 保留旧变体和事件，统一字体、圆角、焦点和触摸高度 |
 | `.input-base`、`.select-base`、`.textarea-base` | Form control | 保留页面尺寸，统一字体、边框、焦点 |
 | `.widget`、`.panel-dark`、`.monitor-card`、`.info-card`、`.update-card`、`.modal-content` | Panel/Surface | 统一面板圆角 |
-| `.btn-tab`、`.phone-tab`、`.phone-filter-btn`、`.pomodoro-mode-btn` | Tab/Segment | 统一字体、焦点和圆角基线 |
+| `.btn-tab`、`.pomodoro-mode-btn` | Tab/Segment | 统一字体、焦点和圆角基线 |
 | `.device-item`、`.app-list-item` | List item | 动态列表追加 `.ui-list-item` |
 | `.empty-state` | Empty state | 兼容旧名称，新增页面优先使用 `.ui-empty-state` |
 
