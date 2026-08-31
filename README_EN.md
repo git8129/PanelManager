@@ -41,7 +41,7 @@ hardware implementation.
 ## Repository Structure
 
 - `PanelManager/`: the .NET MAUI and BlazorWebView host application
-- `PanelManager/Dependencies/Isd/IsdDownload.dll`: precompiled x64 native PMFW verification and download boundary, SHA-256 `08126B1CB737E3BB7CA64177DF333032B7AB8918B2A7F405D548F7358B72929C`
+- `PanelManager/Dependencies/Isd/IsdDownload.dll`: precompiled x64 native PMFW verification and download boundary, SHA-256 `2E8748ED54EA93C0D8D433E7B6A877CED01569BA24404ADC5B7B6BEA2EDB5800`
 - `FloatingWindow/`: Windows floating-window companion application using WPF
 - `Installer/`: Windows installer project
 - `skills/panelmanager-opencode/SKILL.md`: local OpenCode project skill

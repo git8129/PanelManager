@@ -35,7 +35,7 @@ PanelManager 是一个基于 .NET MAUI + BlazorWebView 的桌面副屏控制面�
 ## 仓库结构
 
 - `PanelManager/`：主应用（MAUI + BlazorWebView）
-- `PanelManager/Dependencies/Isd/IsdDownload.dll`：预编译 x64 原生 PMFW 验签与下载边界，SHA-256 为 `08126B1CB737E3BB7CA64177DF333032B7AB8918B2A7F405D548F7358B72929C`
+- `PanelManager/Dependencies/Isd/IsdDownload.dll`：预编译 x64 原生 PMFW 验签与下载边界，SHA-256 为 `2E8748ED54EA93C0D8D433E7B6A877CED01569BA24404ADC5B7B6BEA2EDB5800`
 - `FloatingWindow/`：Windows 悬浮窗子项目（WPF）
 - `skills/panelmanager-opencode/SKILL.md`：OpenCode 本地工程技能（主规则入口）
 - `AGENTS.md`：仓库智能体手册，也是源码包工作区的通用规则入口
