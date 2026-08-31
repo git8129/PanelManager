@@ -69,6 +69,8 @@ function initWebSocket() {
         ws.onclose = () => {
             console.log('[WebSocket] 连接已关闭');
             wsConnected = false;
+            serialConnected = false;
+            setCurrentFirmwareDisconnected();
             resetWifiConnectionAfterTransportLoss();
             const pending = Array.from(messageCallbacks.entries());
             messageCallbacks.clear();
@@ -286,7 +288,9 @@ function handleEvent(message) {
                     sendMessage('bluetooth', 'setVisibility', { enable: 1 }, () => { });
                 }
             } else {
+                serialConnected = false;
                 updateSerialStatusBar(false);
+                setCurrentFirmwareDisconnected();
             }
             break;
 
@@ -350,6 +354,7 @@ function handleEvent(message) {
                 bluetoothStatusRetryTimer = null;
             }
             updateSerialStatusBar(false);
+            setCurrentFirmwareDisconnected();
             resetDeviceScreenSwitchPrompt();
             restoreFromDeviceScreenAfterSerialDisconnect();
             //handleSerialDisconnect(); // 前端不再处理断开重连逻辑
@@ -365,6 +370,7 @@ function handleEvent(message) {
             if (serialConnected) {
                 showToast('串口已关闭');
                 updateSerialStatusBar(false);
+                setCurrentFirmwareDisconnected();
                 serialConnected = false;
                 resetWifiConnectionAfterTransportLoss();
                 audioRouteApplyState.routeQueued = false;
@@ -11887,6 +11893,31 @@ let secureUpdateCheckTimer = null;
 let onlineUpdateStartedAt = 0;
 let onlineUpdateElapsedTimer = null;
 
+function setCurrentFirmwareDisconnected() {
+    const element = document.getElementById('currentVersion');
+    if (element) element.textContent = '未连接';
+}
+
+function showUpdateDeviceDisconnected(actionLabel) {
+    setCurrentFirmwareDisconnected();
+    const updateStatus = document.getElementById('updateStatus');
+    if (updateStatus) {
+        updateStatus.textContent = '设备未连接';
+        updateStatus.style.color = '#ff453a';
+    }
+    showToast('设备未连接，请连接设备后重试', 4000);
+    showModal('设备未连接', `
+        <div style="line-height:1.7;">
+            <div style="font-weight:800;color:#ff453a;">当前没有已认证的设备连接。</div>
+            <div style="margin-top:10px;color:var(--text-secondary);">请确认设备已通过 USB 正常连接，状态栏显示 COM 端口后再${actionLabel}。</div>
+        </div>
+    `, null, 'sm');
+    const confirmBtn = document.getElementById('modalConfirm');
+    const cancelBtn = document.getElementById('modalCancel');
+    if (confirmBtn) confirmBtn.textContent = '知道了';
+    if (cancelBtn) cancelBtn.style.display = 'none';
+}
+
 function setOnlineUpdateProgressVisible(visible) {
     const progress = document.getElementById('updateProgress');
     const summary = document.getElementById('onlineUpdateSummary');
@@ -11968,10 +11999,19 @@ function refreshOnlineUpdateViewAfterReconnect() {
 }
 
 function refreshCurrentFirmwareVersion() {
+    if (!serialConnected) {
+        setCurrentFirmwareDisconnected();
+        return;
+    }
     sendMessageWithTimeout('update', 'getVersion', {}, 3000, (response) => {
         const version = response?.data?.version;
         const element = document.getElementById('currentVersion');
-        if (element) element.textContent = version || '未知';
+        if (response?.code === 100) {
+            serialConnected = false;
+            setCurrentFirmwareDisconnected();
+            return;
+        }
+        if (element) element.textContent = serialConnected ? (version || '未知') : '未连接';
     });
 }
 
@@ -12094,6 +12134,10 @@ function finishSecureUpdateCheck(code, message, data) {
 }
 
 function startSecureDownload() {
+    if (!serialConnected) {
+        showUpdateDeviceDisconnected('下载更新');
+        return;
+    }
     const updateButton = document.getElementById('updateBtn');
     const updateStatus = document.getElementById('updateStatus');
     if (!secureUpdateAvailableInfo) {
@@ -12129,6 +12173,10 @@ function startSecureDownload() {
  * 检查安全更新（连接服务器查询是否有新版本）
  */
 function checkSecureUpdate() {
+    if (!serialConnected) {
+        showUpdateDeviceDisconnected('检查更新');
+        return;
+    }
     const updateStatus = document.getElementById('updateStatus');
     const checkUpdateBtn = document.getElementById('checkUpdateBtn');
     const updateBtn = document.getElementById('updateBtn');
@@ -12163,6 +12211,10 @@ function checkSecureUpdate() {
  * 开始安全固件更新
  */
 function startSecureUpdate() {
+    if (!serialConnected) {
+        showUpdateDeviceDisconnected('开始安全更新');
+        return;
+    }
     const updateStatus = document.getElementById('updateStatus');
     const updateBtn = document.getElementById('updateBtn');
     const updateProgress = document.getElementById('updateProgress');
@@ -12454,12 +12506,25 @@ function startManualUpdate() {
         return;
     }
 
-    if (!preserveUserData) {
-        confirmFormatAllBeforeManualUpdate(pmfwPath);
-        return;
-    }
+    sendMessage('system', 'manualUpdatePreflight', {}, (response) => {
+        if (!response || response.code !== 0) {
+            showToast('无法检查更新设备状态，请稍后重试', 3000);
+            return;
+        }
 
-    continueManualUpdateAfterDataWarning(pmfwPath, preserveUserData);
+        const state = response.data || {};
+        if (!state.serialConnected && !state.downloadModePresent) {
+            showUpdateDeviceDisconnected('开始烧录');
+            return;
+        }
+
+        if (!preserveUserData) {
+            confirmFormatAllBeforeManualUpdate(pmfwPath);
+            return;
+        }
+
+        continueManualUpdateAfterDataWarning(pmfwPath, preserveUserData);
+    });
 }
 
 function confirmFormatAllBeforeManualUpdate(pmfwPath) {
@@ -12502,7 +12567,7 @@ function continueManualUpdateAfterDataWarning(pmfwPath, preserveUserData) {
             return;
         }
 
-        startManualUpdateTask(pmfwPath, preserveUserData, false);
+        showUpdateDeviceDisconnected('开始烧录');
     });
 }
 

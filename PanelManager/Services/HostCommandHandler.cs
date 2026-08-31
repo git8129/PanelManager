@@ -1080,6 +1080,13 @@ public static class HostCommandHandler
                         return msg.Fail(ErrorCode.InvalidParams, "Missing PMFW package path");
                     }
 
+                    if (!bridge.IsSerialConnected && !bridge.HasDownloadModeDevice())
+                    {
+                        return msg.Fail(
+                            ErrorCode.SerialNotOpen,
+                            "设备未连接，请连接设备后再开始烧录");
+                    }
+
                     if (_updateTaskRunning)
                     {
                         return msg.Fail(ErrorCode.Busy, "A firmware update is already running");
