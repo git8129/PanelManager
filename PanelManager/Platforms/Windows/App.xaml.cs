@@ -451,7 +451,10 @@ namespace PanelManager.WinUI
 
         private static DisplayInfo? FindDevicePortraitDisplay()
         {
+            DisplayInfo? landscapeAwayFromWindow = null;
             DisplayInfo? landscapeFallback = null;
+            var windowX = _appWindow?.Position.X;
+            var windowY = _appWindow?.Position.Y;
 
             for (uint i = 0; ; i++)
             {
@@ -481,10 +484,22 @@ namespace PanelManager.WinUI
                 if (mode.dmPelsWidth == 1920 && mode.dmPelsHeight == 1080)
                 {
                     landscapeFallback ??= info;
+                    if (windowX is int x && windowY is int y && !DisplayContainsPoint(mode, x, y))
+                    {
+                        landscapeAwayFromWindow ??= info;
+                    }
                 }
             }
 
-            return landscapeFallback;
+            return landscapeAwayFromWindow ?? landscapeFallback;
+        }
+
+        private static bool DisplayContainsPoint(DevMode mode, int x, int y)
+        {
+            return x >= mode.dmPositionX
+                && y >= mode.dmPositionY
+                && x < mode.dmPositionX + (int)mode.dmPelsWidth
+                && y < mode.dmPositionY + (int)mode.dmPelsHeight;
         }
 
         private static DisplayInfo? GetDisplayInfo(string deviceName, string displayName)
