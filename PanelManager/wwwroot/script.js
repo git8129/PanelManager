@@ -502,6 +502,10 @@ function handleEvent(message) {
                 // 更新设备列表
                 scheduleRenderBluetoothList();
                 showToast(`已连接到 ${resolveConnectedBtName(bluetoothStatus.connectedDevice) || '蓝牙设备'}`);
+                if (bluetoothConnectWatchdogTimer) {
+                    clearTimeout(bluetoothConnectWatchdogTimer);
+                    bluetoothConnectWatchdogTimer = null;
+                }
                 pendingBtConnect = null;
             }
             break;
@@ -536,11 +540,29 @@ function handleEvent(message) {
                         pairingCode
                     })
                     : pairingCode;
-                showModal('蓝牙配对', modalBody);
+                const sendPairConfirm = (accept) => {
+                    sendMessage('bluetooth', 'confirmPair', { accept }, () => { });
+                };
+                showModal('蓝牙配对', modalBody, () => {
+                    sendPairConfirm(true);
+                });
                 const confirmBtn = document.getElementById('modalConfirm');
                 const cancelBtn = document.getElementById('modalCancel');
-                if (confirmBtn) confirmBtn.textContent = '知道了';
-                if (cancelBtn) cancelBtn.style.display = 'none';
+                const closeBtn = document.getElementById('modalClose');
+                if (confirmBtn) confirmBtn.textContent = '确认';
+                if (cancelBtn) {
+                    cancelBtn.style.display = '';
+                    cancelBtn.onclick = () => {
+                        sendPairConfirm(false);
+                        closeMainModal();
+                    };
+                }
+                if (closeBtn) {
+                    closeBtn.onclick = () => {
+                        sendPairConfirm(false);
+                        closeMainModal();
+                    };
+                }
             }
             break;
         case 'bluetooth:disconnected':
@@ -596,6 +618,10 @@ function handleEvent(message) {
                 console.log('[Bluetooth] 连接失败:', message.data);
                 showToast(`连接失败: ${message.data.reason || '未知原因'}`);
                 if (pendingBtConnect && pendingBtConnect.addr === message.data.addr) {
+                    if (bluetoothConnectWatchdogTimer) {
+                        clearTimeout(bluetoothConnectWatchdogTimer);
+                        bluetoothConnectWatchdogTimer = null;
+                    }
                     pendingBtConnect = null;
                 }
             }
@@ -1195,11 +1221,10 @@ function initSettingsNav(defaultTargetId = null) {
 
         if (targetId === 'settings-bluetooth') {
             initBluetoothStatus();
-            // entering bluetooth page: enable discoverable/connectable
             sendMessage('bluetooth', 'setVisibility', { enable: 1 }, () => { });
         } else {
             stopBluetoothAutoScan();
-            // leaving bluetooth page: disable discoverable/connectable (save power)
+            stopBluetoothDeviceScan();
             sendMessage('bluetooth', 'setVisibility', { enable: 0 }, () => { });
         }
 
@@ -1336,6 +1361,7 @@ window.closePage = () => {
     stopWifiAutoScan();
     stopWifiDeviceScan();
     stopBluetoothAutoScan();
+    stopBluetoothDeviceScan();
 
     document.querySelectorAll('.detail-page').forEach(page => page.classList.remove('active'));
     document.getElementById('desktop-view').classList.add('active');
@@ -8744,7 +8770,10 @@ let bluetoothOrderCounter = 0;
 const bluetoothOrderMap = new Map(); // key -> order
 let bluetoothStatusRetryTimer = null;
 let bluetoothStatusRetryCount = 0;
+let bluetoothSwitchBusy = false;
+let bluetoothConnectWatchdogTimer = null;
 const BLUETOOTH_STATUS_RETRY_LIMIT = 6;
+const BLUETOOTH_CONNECT_WATCHDOG_MS = 20000;
 
 function scheduleBluetoothStatusRetry() {
     if (bluetoothStatusRetryTimer || !serialConnected || bluetoothStatusRetryCount >= BLUETOOTH_STATUS_RETRY_LIMIT) return;
@@ -8912,7 +8941,7 @@ function initBluetoothStatus() {
                 bluetoothStatus.connectedDevice = null;
                 connectedDevice = null;
                 bluetoothConnected = false;
-                if (mode !== 0) scheduleBluetoothStatusRetry();
+                if (mode !== 0 && !bluetoothStatus.connected) scheduleBluetoothStatusRetry();
             }
 
             updateBluetoothStatusBar();
@@ -8929,9 +8958,11 @@ function initBluetoothStatus() {
             const bluetoothModeRow = document.getElementById('bluetoothModeRow');
             const bluetoothModeSelect = document.getElementById('bluetoothModeSelect');
             const bluetoothLocalNameRow = document.getElementById('bluetoothLocalNameRow');
+            bluetoothStatus.scanning = !!response.data.scanning;
+            isScanning = bluetoothStatus.scanning;
             if (mode !== 0) {
                 bluetoothStatus.enabled = true;
-                bluetoothSwitchInput.checked = true;
+                if (bluetoothSwitchInput) bluetoothSwitchInput.checked = true;
                 bluetoothDevicesContainer.style.display = 'block';
                 if (bluetoothModeRow) bluetoothModeRow.style.display = 'flex';
                 if (bluetoothModeSelect) bluetoothModeSelect.value = String(mode);
@@ -8950,7 +8981,7 @@ function initBluetoothStatus() {
                 // 启动自动扫描
                 if (mode === 2) {
                     startBluetoothAutoScan();
-                    scanBluetoothSilent();
+                    if (!bluetoothStatus.scanning) scanBluetoothSilent();
                 } else {
                     // 接收模式用于被手机发现/连接：不要后台反复发起 inquiry 扫描
                     stopBluetoothAutoScan();
@@ -9032,11 +9063,18 @@ function handleBluetoothSwitchChange(isOn) {
     const bluetoothModeRow = document.getElementById('bluetoothModeRow');
     const bluetoothModeSelect = document.getElementById('bluetoothModeSelect');
     const bluetoothLocalNameRow = document.getElementById('bluetoothLocalNameRow');
+    if (bluetoothSwitchBusy) {
+        document.getElementById('bluetoothSwitchInput').checked = !isOn;
+        return;
+    }
+    bluetoothSwitchBusy = true;
+    abortBluetoothActivity();
     if (isOn) {
         // 开启蓝牙：默认发射模式；如已选择模式则按选择启用
         const desiredMode = bluetoothModeSelect ? parseInt(bluetoothModeSelect.value, 10) : 2;
         const modeToSet = (desiredMode === 1 || desiredMode === 2) ? desiredMode : 2;
         sendMessage('bluetooth', 'setMode', { mode: modeToSet }, (response) => {
+            bluetoothSwitchBusy = false;
             if (response.code === 0) {
                 bluetoothStatus.enabled = true;
                 enableBluetoothUI();
@@ -9047,17 +9085,15 @@ function handleBluetoothSwitchChange(isOn) {
                 // If currently on bluetooth settings page, keep discoverable.
                 sendMessage('bluetooth', 'setVisibility', { enable: isBluetoothSettingsActive() ? 1 : 0 }, () => { });
             } else {
-                // 失败则恢复开关状态
                 document.getElementById('bluetoothSwitchInput').checked = false;
                 showToast(`蓝牙开启失败: ${formatDeviceCommandError(response)}`);
             }
         });
     } else {
-        // 关闭蓝牙：切换到 DISABLED 模式
-        // Ensure visibility off when turning off
         sendMessage('bluetooth', 'setVisibility', { enable: 0 }, () => { });
 
         sendMessage('bluetooth', 'setMode', { mode: 0 }, (response) => {
+            bluetoothSwitchBusy = false;
             if (response.code === 0) {
                 bluetoothStatus.enabled = false;
                 bluetoothStatus.connected = false;
@@ -9092,6 +9128,7 @@ document.addEventListener('change', function (e) {
     const mode = parseInt(target.value, 10);
     if (!bluetoothStatus.enabled) return;
     if (mode !== 1 && mode !== 2) return;
+    abortBluetoothActivity();
     sendMessage('bluetooth', 'setMode', { mode }, (response) => {
         if (response.code !== 0) {
             console.warn('[Bluetooth] 模式切换失败:', response.msg);
@@ -9159,26 +9196,43 @@ function stopBluetoothAutoScan() {
         bluetoothAutoScanInterval = null;
     }
 }
+function stopBluetoothDeviceScan() {
+    isScanning = false;
+    bluetoothStatus.scanning = false;
+    sendMessage('bluetooth', 'stopScan', {}, () => { });
+}
+function abortBluetoothActivity() {
+    stopBluetoothAutoScan();
+    if (bluetoothConnectWatchdogTimer) {
+        clearTimeout(bluetoothConnectWatchdogTimer);
+        bluetoothConnectWatchdogTimer = null;
+    }
+    pendingBtConnect = null;
+    stopBluetoothDeviceScan();
+}
 // 静默扫描蓝牙（不显示加载状态）
 function scanBluetoothSilent() {
     if (!isBluetoothSettingsActive()) {
         return;
     }
-    // Do not clear the list on each scan; keep previous results to avoid flicker.
+    if (isScanning || bluetoothStatus.scanning || pendingBtConnect) {
+        return;
+    }
     bluetoothScanSeq++;
 
     isScanning = true;
     bluetoothStatus.scanning = true;
     scheduleRenderBluetoothList();
-    // 发送开始扫描命令
     sendMessage('bluetooth', 'startScan', { duration: 8 }, (response) => {
         if (response.code !== 0) {
             console.warn('[Bluetooth] 扫描失败:', response.msg);
-            isScanning = false;
-            bluetoothStatus.scanning = false;
-            scheduleRenderBluetoothList();
+            const already = response.code === 6 && /already scanning/i.test(String(response.msg || ''));
+            if (!already) {
+                isScanning = false;
+                bluetoothStatus.scanning = false;
+                scheduleRenderBluetoothList();
+            }
         }
-        // 扫描结果会通过事件推送
     });
 }
 // 更新当前连接的蓝牙设备名称
@@ -9409,46 +9463,41 @@ function getBluetoothDeviceIcon(deviceClass) {
 }
 // 连接蓝牙设备
 window.connectBluetooth = (addr, name) => {
-    if (bluetoothStatus.scanning || isScanning) {
-        stopBluetoothAutoScan();
-        pendingBtConnect = { addr, name, waitingForScanStop: true };
-        showToast(`正在停止搜索并连接到 ${name}...`);
-        sendMessage('bluetooth', 'stopScan', {}, (response) => {
-            if (response.code !== 0) {
-                showToast(`停止搜索失败: ${response.msg || '未知错误'}`);
-                pendingBtConnect = null;
-                return;
-            }
-
-            // stopScan clears the device scan state before the controller emits
-            // inquiry-complete, so keep a bounded fallback for older firmware.
-            setTimeout(() => {
-                if (pendingBtConnect?.waitingForScanStop &&
-                    normalizeBtAddr(pendingBtConnect.addr) === normalizeBtAddr(addr)) {
-                    pendingBtConnect.waitingForScanStop = false;
-                    isScanning = false;
-                    bluetoothStatus.scanning = false;
-                    performBluetoothConnect(addr, name);
-                }
-            }, 800);
-        });
-        return;
-    }
+    stopBluetoothAutoScan();
+    isScanning = false;
+    bluetoothStatus.scanning = false;
+    sendMessage('bluetooth', 'stopScan', {}, () => { });
     performBluetoothConnect(addr, name);
 };
-// 执行实际的蓝牙连接
+function armBluetoothConnectWatchdog(addr) {
+    if (bluetoothConnectWatchdogTimer) clearTimeout(bluetoothConnectWatchdogTimer);
+    bluetoothConnectWatchdogTimer = setTimeout(() => {
+        bluetoothConnectWatchdogTimer = null;
+        if (!pendingBtConnect || normalizeBtAddr(pendingBtConnect.addr) !== normalizeBtAddr(addr)) return;
+        pendingBtConnect = null;
+        showToast('蓝牙连接超时，请重试');
+        if (isBluetoothSettingsActive() && bluetoothStatus.enabled) {
+            startBluetoothAutoScan();
+            scanBluetoothSilent();
+        }
+    }, BLUETOOTH_CONNECT_WATCHDOG_MS);
+}
 function performBluetoothConnect(addr, name) {
     showToast(`正在连接到 ${name}...`);
     resolveBtName(addr, name);
     pendingBtConnect = { addr, name };
+    armBluetoothConnectWatchdog(addr);
     sendMessage('bluetooth', 'connect', { addr: addr }, (response) => {
         if (response.code === 0) {
             console.log('[Bluetooth] 连接请求已发送');
-            // 实际连接成功会通过 'connected' 事件通知
-        } else {
-            showToast(`连接失败: ${response.msg || '未知错误'}`);
-            pendingBtConnect = null;
+            return;
         }
+        if (bluetoothConnectWatchdogTimer) {
+            clearTimeout(bluetoothConnectWatchdogTimer);
+            bluetoothConnectWatchdogTimer = null;
+        }
+        showToast(`连接失败: ${response.msg || '未知错误'}`);
+        pendingBtConnect = null;
     });
 }
 // 断开蓝牙设备
@@ -9472,18 +9521,20 @@ window.disconnectBluetooth = (addr, name) => {
 // 忘记蓝牙设备
 window.forgetBluetooth = (addr, name) => {
     confirmModal(`确定要忘记设备 "${String(name || '')}" 吗？`, () => {
+        const wasConnected = !!(bluetoothStatus.connectedDevice &&
+            normalizeBtAddr(bluetoothStatus.connectedDevice.addr) === normalizeBtAddr(addr));
         sendMessage('bluetooth', 'forgetDevice', { addr: addr }, (response) => {
             if (response.code === 0) {
-                // 从已配对列表中移除
                 pairedDevices = pairedDevices.filter(d => d.addr !== addr);
                 bluetoothDevices = bluetoothDevices.filter(d => d.addr !== addr);
-                // 如果忘记的是当前连接的设备，更新状态
-                if (connectedDevice && connectedDevice.addr === addr) {
+                if (wasConnected) {
                     connectedDevice = null;
-                    document.getElementById('btStatus').textContent = '未连接';
+                    bluetoothConnected = false;
+                    bluetoothStatus.connected = false;
+                    bluetoothStatus.connectedDevice = null;
+                    const btStatusEl = document.getElementById('btStatus');
+                    if (btStatusEl) btStatusEl.textContent = '未连接';
                 }
-                bluetoothStatus.connected = false;
-                bluetoothStatus.connectedDevice = null;
                 updateCurrentBluetoothDevice();
                 scheduleRenderBluetoothList();
                 showToast(`已忘记 ${name}`);
