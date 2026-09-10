@@ -2510,6 +2510,17 @@ body {
     background: rgba(48, 209, 88, 0.24);
 }
 
+.touch-cal-actions .touch-cal-action--stop {
+    border-color: rgba(255, 69, 58, 0.48);
+    color: #ffffff;
+    background: rgba(255, 69, 58, 0.78);
+}
+
+.touch-cal-actions .touch-cal-action--stop:hover {
+    border-color: rgba(255, 140, 130, 0.72);
+    background: rgba(255, 69, 58, 0.9);
+}
+
 .touch-cal-actions.compact .touch-cal-action {
     flex: 0 1 auto;
     min-width: 180px;
@@ -2672,6 +2683,16 @@ body {
     background: rgba(48, 209, 88, 0.12);
 }
 
+.touch-cal-axis-list {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+    margin: 16px auto 0;
+    width: fit-content;
+    text-align: left;
+}
+
 .touch-cal-checkbox {
     display: inline-flex;
     align-items: center;
@@ -2708,6 +2729,105 @@ body {
     font-size: 82px;
     font-weight: 900;
     box-shadow: 0 24px 90px rgba(48, 209, 88, 0.32);
+}
+
+#page-touch-debug {
+    background:
+        radial-gradient(circle at 14% 16%, rgba(10, 132, 255, 0.18), transparent 34%),
+        radial-gradient(circle at 86% 74%, rgba(48, 209, 88, 0.12), transparent 30%),
+        rgba(0, 0, 0, 0.72);
+}
+
+.touch-debug-page {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-rows: 1fr auto;
+    gap: 20px;
+    padding: 20px 24px 0;
+}
+
+.touch-debug-board {
+    position: relative;
+    min-height: 0;
+    overflow: hidden;
+    touch-action: none;
+    border-radius: 28px;
+    background:
+        linear-gradient(rgba(255, 255, 255, 0.045) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.045) 1px, transparent 1px),
+        rgba(4, 8, 16, 0.86);
+    background-size: 64px 64px, 64px 64px, auto;
+}
+
+.touch-debug-empty {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    color: var(--text-secondary);
+    text-align: center;
+    pointer-events: none;
+}
+
+.touch-debug-empty-title {
+    font-size: var(--font-heading-1);
+    color: var(--text-primary);
+    font-weight: 800;
+}
+
+.touch-debug-empty-desc {
+    font-size: var(--font-body-lg);
+}
+
+.touch-debug-dot {
+    position: absolute;
+    width: 88px;
+    height: 88px;
+    margin: -44px 0 0 -44px;
+    border-radius: 50%;
+    pointer-events: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    font-weight: 800;
+    border: 4px solid var(--accent-blue);
+    background: rgba(10, 132, 255, 0.22);
+    box-shadow: 0 0 0 10px rgba(10, 132, 255, 0.12);
+}
+
+.touch-debug-hud {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 16px 20px;
+    border-radius: 28px;
+}
+
+.touch-debug-count {
+    font-size: var(--font-body-lg);
+    font-weight: 800;
+    color: var(--accent-blue);
+}
+
+.touch-debug-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.touch-debug-item {
+    min-height: 48px;
+    padding: 8px 16px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.06);
+    font-family: var(--font-family-mono, Consolas, monospace);
+    color: var(--text-primary);
 }
 
 /* ========== AI 页面 v2（先清理旧样式，再重建） ========== */

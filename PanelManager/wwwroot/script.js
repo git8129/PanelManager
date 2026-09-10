@@ -1252,7 +1252,17 @@ window.openPage = (pageName, tabName) => {
     }
 
     if (pageName === 'touch-calibration') {
-        touchCal2OpenPage();
+        if (touchCal2State.returnFromDebug) {
+            touchCal2State.returnFromDebug = false;
+            touchCal2SetPhase('coords');
+            touchCal2SetCoordMode('manual');
+        } else {
+            touchCal2OpenPage();
+        }
+    }
+
+    if (pageName === 'touch-debug') {
+        touchDebugOpenPage();
     }
 
     if (pageName === 'audio-eq') {
@@ -1263,6 +1273,17 @@ window.closePage = () => {
     const touchCalPage = document.getElementById('page-touch-calibration');
     if (touchCalPage && touchCalPage.classList.contains('active')) {
         touchCal2Stop(true);
+    }
+
+    const touchDebugPage = document.getElementById('page-touch-debug');
+    if (touchDebugPage && touchDebugPage.classList.contains('active')) {
+        touchDebugClosePage();
+        if (touchCal2State.fromDebug) {
+            touchCal2State.fromDebug = false;
+            touchCal2State.returnFromDebug = true;
+            openPage('touch-calibration');
+            return;
+        }
     }
 
     // 离开设置页：如果蓝牙设置处于激活状态，关闭可发现/可连接
@@ -4909,7 +4930,10 @@ window.aiNewChat = () => {
     aiResetChatUi();
 };
 
-// ========== 触摸校准向导（设备侧 raw -> HID 横屏坐标） ==========
+// ========== 触摸校准向导（设备侧 raw -> HID 1080x1920） ==========
+
+const TOUCH_HID_MAX_X = 1080;
+const TOUCH_HID_MAX_Y = 1920;
 
 const TOUCH_CAL2_STEPS = [
     { key: 'tl', label: '左上角', shortLabel: '左上', x: '8%', y: '12%' },
@@ -4919,11 +4943,16 @@ const TOUCH_CAL2_STEPS = [
 ];
 
 const touchCal2State = {
-    active: false,
     phase: 'screen',
+    mode: 'points',
+    active: false,
     step: 0,
     samples: [],
+    lastSampleAt: 0,
+    stepShownAt: 0,
     saving: false,
+    fromDebug: false,
+    returnFromDebug: false,
 };
 
 function touchCal2SetText(id, text) {
@@ -4958,6 +4987,63 @@ function touchCal2SetPhase(phase) {
     document.getElementById('touchCalScreenPanel')?.classList.toggle('active', phase === 'screen');
     document.getElementById('touchCalCoordPanel')?.classList.toggle('active', phase === 'coords');
     document.getElementById('touchCalDonePanel')?.classList.toggle('active', phase === 'done');
+    if (phase === 'coords') {
+        touchCal2SetCoordMode(touchCal2State.mode || 'points');
+    }
+}
+
+function touchCal2SyncSampleButton() {
+    const btn = document.getElementById('touchCalSampleBtn');
+    if (!btn) return;
+    const stopping = touchCal2State.active;
+    btn.textContent = stopping ? '停止' : '开始采样';
+    btn.classList.toggle('touch-cal-action--primary', !stopping);
+    btn.classList.toggle('touch-cal-action--stop', stopping);
+}
+
+function touchCal2SetCoordMode(mode) {
+    touchCal2State.mode = mode;
+    const manual = mode === 'manual';
+    document.getElementById('touchCalPointsView')?.toggleAttribute('hidden', manual);
+    document.getElementById('touchCalManualView')?.toggleAttribute('hidden', !manual);
+    document.getElementById('touchCalProgress')?.toggleAttribute('hidden', manual);
+    document.getElementById('touchCalSampleBtn')?.toggleAttribute('hidden', manual);
+    document.getElementById('touchCalDebugBtn')?.toggleAttribute('hidden', !manual);
+    document.getElementById('touchCalSaveBtn')?.toggleAttribute('hidden', !manual);
+    const toggle = document.getElementById('touchCalManualToggle');
+    const toggleLabel = document.getElementById('touchCalManualToggleLabel');
+    if (toggle) toggle.checked = manual;
+    if (toggleLabel) toggleLabel.textContent = '手动校准';
+    const target = document.getElementById('touchCalTarget');
+    if (target && manual) {
+        target.classList.remove('visible', 'hit');
+    }
+    touchCal2SyncSampleButton();
+    if (!manual) {
+        touchCal2RenderProgress();
+        touchCal2SetStatus('touchCalCoordStatus', touchCal2State.active ? '采样已开始。请触摸屏幕上的蓝色目标点。' : '准备就绪。请先点击“开始采样”。');
+    } else {
+        touchCal2SetStatus('touchCalCoordStatus', '用鼠标勾选轴向，或打开触控调试查看效果。');
+    }
+}
+
+function touchCal2OnManualToggle() {
+    const manual = !!document.getElementById('touchCalManualToggle')?.checked;
+    if (manual) {
+        touchCal2Stop(true);
+        touchCal2SetCoordMode('manual');
+    } else {
+        touchCal2ResetSamples();
+        touchCal2SetCoordMode('points');
+    }
+}
+
+function touchCal2ToggleSample() {
+    if (touchCal2State.active) {
+        touchCal2Stop();
+    } else {
+        touchCal2Start();
+    }
 }
 
 function touchCal2RenderProgress() {
@@ -4973,23 +5059,26 @@ function touchCal2RenderProgress() {
     const current = TOUCH_CAL2_STEPS[touchCal2State.step];
     if (target) {
         target.classList.remove('visible', 'hit');
-        if (touchCal2State.active && current) {
+        if (touchCal2State.mode === 'points' && touchCal2State.active && current) {
             target.style.left = current.x;
             target.style.top = current.y;
             target.classList.add('visible');
+            if (!touchCal2State.stepShownAt) {
+                touchCal2State.stepShownAt = Date.now();
+            }
         }
     }
 
     const done = touchCal2State.step >= TOUCH_CAL2_STEPS.length;
     if (done) {
         touchCal2SetText('touchCalPromptTitle', touchCal2State.saving ? '正在保存校准数据' : '四个点已采集完成');
-        touchCal2SetText('touchCalPromptText', '请稍等，正在计算坐标映射并下发到下位机。');
+        touchCal2SetText('touchCalPromptText', '请稍等，正在计算轴向并保存到下位机。');
     } else if (touchCal2State.active && current) {
         touchCal2SetText('touchCalPromptTitle', `请触摸 ${current.label}`);
         touchCal2SetText('touchCalPromptText', '看准屏幕上的蓝色目标点，用手指轻点一次。收到样本后会自动进入下一个点。');
     } else {
         touchCal2SetText('touchCalPromptTitle', '点击“开始采样”');
-        touchCal2SetText('touchCalPromptText', '开始后，下位机会进入采样模式。请按屏幕上的亮点位置依次触摸四个角，每个角只点一次。');
+        touchCal2SetText('touchCalPromptText', '开始后请按屏幕上的亮点依次触摸四个角，每个角只点一次。用鼠标点按钮。');
     }
 }
 
@@ -4997,14 +5086,42 @@ function touchCal2ResetSamples() {
     touchCal2State.active = false;
     touchCal2State.step = 0;
     touchCal2State.samples = [];
+    touchCal2State.lastSampleAt = 0;
+    touchCal2State.stepShownAt = 0;
     touchCal2State.saving = false;
     touchCal2RenderProgress();
-    touchCal2SetStatus('touchCalCoordStatus', '准备就绪。请先点击“开始采样”。');
+    touchCal2SyncSampleButton();
+}
+
+function touchCal2ApplyCfgToUi(cfg) {
+    const swap = document.getElementById('touchCalSwapXy');
+    const mirrorX = document.getElementById('touchCalMirrorX');
+    const mirrorY = document.getElementById('touchCalMirrorY');
+    if (swap) swap.checked = !!cfg?.swap_xy;
+    if (mirrorX) mirrorX.checked = !!cfg?.mirror_x;
+    if (mirrorY) mirrorY.checked = !!cfg?.mirror_y;
+}
+
+function touchCal2BuildCfg() {
+    return {
+        enabled: 1,
+        swap_xy: document.getElementById('touchCalSwapXy')?.checked ? 1 : 0,
+        mirror_x: document.getElementById('touchCalMirrorX')?.checked ? 1 : 0,
+        mirror_y: document.getElementById('touchCalMirrorY')?.checked ? 1 : 0,
+        in_min_x: 0,
+        in_max_x: TOUCH_HID_MAX_X,
+        in_min_y: 0,
+        in_max_y: TOUCH_HID_MAX_Y,
+    };
 }
 
 function touchCal2OpenPage() {
-    touchCal2SetPhase('screen');
+    touchCal2State.saving = false;
+    touchCal2State.fromDebug = false;
+    touchCal2State.returnFromDebug = false;
+    touchCal2State.mode = 'points';
     touchCal2ResetSamples();
+    touchCal2SetPhase('screen');
     touchCal2SetStatus('touchCalScreenStatus', '正在检测下位机触摸屏状态...', 'warn');
     sendMessage('hid', 'touchCalib', { action: 'get' }, (response) => {
         if (response?.code !== 0) {
@@ -5015,6 +5132,7 @@ function touchCal2OpenPage() {
             touchCal2SetStatus('touchCalScreenStatus', '未检测到触摸屏，无法进行触摸校准。请确认触摸屏已连接并重启设备。', 'error');
             return;
         }
+        touchCal2ApplyCfgToUi(response.data?.cfg || {});
         const driver = response.data?.driver ? `（${response.data.driver}）` : '';
         touchCal2SetStatus('touchCalScreenStatus', `已检测到触摸屏${driver}。请先完成屏幕归属确认。`, 'ok');
     });
@@ -5033,13 +5151,19 @@ function touchCal2SwitchToDeviceScreen() {
 }
 
 function touchCal2LaunchWindowsTouchMapper() {
-    touchCal2SetStatus('touchCalScreenStatus', '正在打开 Windows 触摸屏归属校准工具...', 'warn');
-    sendMessage('app', 'launch', { path: 'MultiDigiMon.exe', args: '-touch' }, (response) => {
-        if (response?.code === 0) {
-            touchCal2SetStatus('touchCalScreenStatus', '系统触摸归属校准已打开。完成后回到本向导继续坐标采样。', 'ok');
-        } else {
-            touchCal2SetStatus('touchCalScreenStatus', `启动失败：${response?.msg || '未知错误'}`, 'error');
+    touchCal2SetStatus('touchCalScreenStatus', '正在启用触摸输入并打开 Windows 归属校准...', 'warn');
+    sendMessage('hid', 'touchCalib', { action: 'set', write_flash: 0, cfg: touchCal2BuildCfg() }, (enableResp) => {
+        if (enableResp?.code !== 0) {
+            touchCal2SetStatus('touchCalScreenStatus', `无法启用触摸输入：${enableResp?.msg || '未知错误'}`, 'error');
+            return;
         }
+        sendMessage('app', 'launch', { path: 'MultiDigiMon.exe', args: '-touch' }, (response) => {
+            if (response?.code === 0) {
+                touchCal2SetStatus('touchCalScreenStatus', '系统触摸归属校准已打开。完成后回到本向导继续坐标校正。', 'ok');
+            } else {
+                touchCal2SetStatus('touchCalScreenStatus', `启动失败：${response?.msg || '未知错误'}`, 'error');
+            }
+        });
     });
 }
 
@@ -5053,8 +5177,10 @@ function touchCal2GoCoordinateStep() {
             touchCal2SetStatus('touchCalScreenStatus', '未检测到触摸屏，无法继续。请确认触摸屏已连接并重启设备。', 'error');
             return;
         }
+        touchCal2ApplyCfgToUi(response.data?.cfg || {});
         touchCal2Stop(true);
         touchCal2ResetSamples();
+        touchCal2State.mode = 'points';
         touchCal2SetPhase('coords');
     });
 }
@@ -5063,48 +5189,20 @@ function touchCal2OnRequired(data) {
     if (touchCalibrationGuidePromptPort === 'device-required') return;
     touchCalibrationGuidePromptPort = 'device-required';
     const driver = data?.driver ? `（${data.driver}）` : '';
-    showToast(`检测到触摸屏${driver}尚未校准，请完成触摸校准向导`, 6000);
+    showToast(`检测到触摸屏${driver}尚未校准，请用鼠标完成触摸校准向导`, 6000);
     openPage('touch-calibration');
 }
 
-function touchCal2ComputeCfg(samples) {
-    const tl = samples[0];
-    const tr = samples[1];
-    const br = samples[2];
-    const bl = samples[3];
-    const avg2 = (a, b) => (a + b) / 2;
-
-    const left = { x: avg2(tl.raw_x, bl.raw_x), y: avg2(tl.raw_y, bl.raw_y) };
-    const right = { x: avg2(tr.raw_x, br.raw_x), y: avg2(tr.raw_y, br.raw_y) };
-    const swap_xy = Math.abs(right.x - left.x) < Math.abs(right.y - left.y);
-    const axis = (p) => swap_xy ? { x: p.raw_y, y: p.raw_x } : { x: p.raw_x, y: p.raw_y };
-
-    const atl = axis(tl);
-    const atr = axis(tr);
-    const abr = axis(br);
-    const abl = axis(bl);
-    const x_left = avg2(atl.x, abl.x);
-    const x_right = avg2(atr.x, abr.x);
-    const y_top = avg2(atl.y, atr.y);
-    const y_bottom = avg2(abl.y, abr.y);
-    const mirror_x = x_right < x_left;
-    const mirror_y = y_bottom < y_top;
-
-    const pad = 8;
-    let in_min_x = Math.max(0, Math.floor(Math.min(x_left, x_right) - pad));
-    let in_max_x = Math.max(in_min_x + 1, Math.ceil(Math.max(x_left, x_right) + pad));
-    let in_min_y = Math.max(0, Math.floor(Math.min(y_top, y_bottom) - pad));
-    let in_max_y = Math.max(in_min_y + 1, Math.ceil(Math.max(y_top, y_bottom) + pad));
-
+function touchCal2IdentityCfg() {
     return {
         enabled: 1,
-        swap_xy: swap_xy ? 1 : 0,
-        mirror_x: mirror_x ? 1 : 0,
-        mirror_y: mirror_y ? 1 : 0,
-        in_min_x,
-        in_max_x,
-        in_min_y,
-        in_max_y,
+        swap_xy: 0,
+        mirror_x: 0,
+        mirror_y: 0,
+        in_min_x: 0,
+        in_max_x: TOUCH_HID_MAX_X,
+        in_min_y: 0,
+        in_max_y: TOUCH_HID_MAX_Y,
     };
 }
 
@@ -5115,9 +5213,13 @@ function touchCal2Start() {
     sendMessage('hid', 'touchCalib', { action: 'start' }, (resp) => {
         if (resp?.code === 0) {
             touchCal2State.active = true;
+            touchCal2State.lastSampleAt = Date.now();
+            touchCal2State.stepShownAt = Date.now();
             touchCal2RenderProgress();
+            touchCal2SyncSampleButton();
             touchCal2SetStatus('touchCalCoordStatus', '采样已开始。请触摸屏幕上的蓝色目标点。', 'ok');
         } else {
+            touchCal2SyncSampleButton();
             touchCal2SetStatus('touchCalCoordStatus', `采样启动失败：${resp?.msg || '未知错误'}`, 'error');
         }
     });
@@ -5130,17 +5232,30 @@ function touchCal2Stop(silent = false) {
     touchCal2State.saving = false;
     sendMessage('hid', 'touchCalib', { action: 'stop' }, () => { });
     touchCal2RenderProgress();
+    touchCal2SyncSampleButton();
     if (!silent) touchCal2SetStatus('touchCalCoordStatus', '采样已停止。可重新点击“开始采样”。', 'warn');
 }
 
 function touchCal2OnSample(d) {
-    if (!touchCal2State.active || touchCal2State.saving) return;
+    if (touchCal2State.mode !== 'points' || !touchCal2State.active || touchCal2State.saving) return;
     if (!d || typeof d.raw_x !== 'number' || typeof d.raw_y !== 'number') return;
     if (touchCal2State.step >= TOUCH_CAL2_STEPS.length) return;
 
+    const now = Date.now();
+    if (now - touchCal2State.lastSampleAt < 800) return;
+    if (now - touchCal2State.stepShownAt < 500) return;
+    const last = touchCal2State.samples[touchCal2State.samples.length - 1];
+    if (last) {
+        const dx = d.raw_x - last.raw_x;
+        const dy = d.raw_y - last.raw_y;
+        if ((dx * dx + dy * dy) < 200 * 200) return;
+    }
+
     const step = TOUCH_CAL2_STEPS[touchCal2State.step];
-    touchCal2State.samples.push({ raw_x: d.raw_x, raw_y: d.raw_y, src: d.src || '', contacts: d.contacts || 0 });
+    touchCal2State.lastSampleAt = now;
+    touchCal2State.samples.push({ raw_x: d.raw_x, raw_y: d.raw_y });
     touchCal2State.step++;
+    touchCal2State.stepShownAt = 0;
 
     const target = document.getElementById('touchCalTarget');
     if (target) {
@@ -5160,22 +5275,53 @@ function touchCal2FinishSamples() {
     touchCal2State.active = false;
     touchCal2State.saving = true;
     touchCal2RenderProgress();
-    const writeFlash = !!document.getElementById('touchCal2WriteFlash')?.checked;
-    const cfg = touchCal2ComputeCfg(touchCal2State.samples);
-    touchCal2SetStatus('touchCalCoordStatus', '四个点已采集，正在保存到下位机...', 'warn');
-
-    sendMessage('hid', 'touchCalib', { action: 'set', write_flash: writeFlash ? 1 : 0, cfg }, (resp) => {
+    const cfg = touchCal2IdentityCfg();
+    touchCal2ApplyCfgToUi(cfg);
+    touchCal2SetStatus('touchCalCoordStatus', '四个点已采集，正在保存到下位机 Flash...', 'warn');
+    sendMessage('hid', 'touchCalib', { action: 'set', write_flash: 1, cfg }, (resp) => {
         touchCal2State.saving = false;
         sendMessage('hid', 'touchCalib', { action: 'stop' }, () => { });
         if (resp?.code === 0) {
-            touchCal2SetText('touchCalDoneText', writeFlash ? '配置已写入下位机 Flash，重启后仍会生效。' : '配置已应用到本次运行，重启后需要重新校准。');
+            touchCal2SetText('touchCalDoneText', '配置已写入下位机 Flash，重启后仍会生效。');
             touchCal2SetPhase('done');
-            showToast(writeFlash ? '触摸校准已保存' : '触摸校准已应用');
+            showToast('触摸校准已保存');
         } else {
             touchCal2SetStatus('touchCalCoordStatus', `保存失败：${resp?.msg || '未知错误'}。请重新采样。`, 'error');
-            touchCal2State.step = 0;
-            touchCal2State.samples = [];
-            touchCal2RenderProgress();
+            touchCal2ResetSamples();
+        }
+    });
+}
+
+function touchCal2OpenPreview() {
+    if (touchCal2State.saving) return;
+    touchCal2State.saving = true;
+    const cfg = touchCal2BuildCfg();
+    touchCal2SetStatus('touchCalCoordStatus', '正在应用当前轴向并打开触控调试...', 'warn');
+    sendMessage('hid', 'touchCalib', { action: 'set', write_flash: 0, cfg }, (resp) => {
+        touchCal2State.saving = false;
+        if (resp?.code === 0) {
+            touchCal2State.fromDebug = true;
+            touchCal2SetStatus('touchCalCoordStatus', '已应用当前轴向。看圆圈是否跟着手指，不对就返回改勾选。', 'ok');
+            openPage('touch-debug');
+        } else {
+            touchCal2SetStatus('touchCalCoordStatus', `无法打开调试：${resp?.msg || '未知错误'}`, 'error');
+        }
+    });
+}
+
+function touchCal2Save() {
+    if (touchCal2State.saving) return;
+    touchCal2State.saving = true;
+    const cfg = touchCal2BuildCfg();
+    touchCal2SetStatus('touchCalCoordStatus', '正在保存轴向配置到 Flash...', 'warn');
+    sendMessage('hid', 'touchCalib', { action: 'set', write_flash: 1, cfg }, (resp) => {
+        touchCal2State.saving = false;
+        if (resp?.code === 0) {
+            touchCal2SetText('touchCalDoneText', '配置已写入下位机 Flash，重启后仍会生效。');
+            touchCal2SetPhase('done');
+            showToast('触摸校准已保存');
+        } else {
+            touchCal2SetStatus('touchCalCoordStatus', `保存失败：${resp?.msg || '未知错误'}`, 'error');
         }
     });
 }
@@ -5183,9 +5329,108 @@ function touchCal2FinishSamples() {
 window.touchCal2SwitchToDeviceScreen = touchCal2SwitchToDeviceScreen;
 window.touchCal2LaunchWindowsTouchMapper = touchCal2LaunchWindowsTouchMapper;
 window.touchCal2GoCoordinateStep = touchCal2GoCoordinateStep;
-window.touchCal2Start = touchCal2Start;
-window.touchCal2Stop = touchCal2Stop;
+window.touchCal2OnManualToggle = touchCal2OnManualToggle;
+window.touchCal2ToggleSample = touchCal2ToggleSample;
+window.touchCal2OpenPreview = touchCal2OpenPreview;
+window.touchCal2Save = touchCal2Save;
 window.openTouchCalibration = () => openPage('touch-calibration');
+
+const TOUCH_DEBUG_COLORS = ['#0a84ff', '#30d158', '#ff9f0a', '#ff453a', '#bf5af2', '#64d2ff'];
+const touchDebugPointers = new Map();
+let touchDebugBound = false;
+
+function touchDebugColor(pointerId) {
+    return TOUCH_DEBUG_COLORS[Math.abs(pointerId) % TOUCH_DEBUG_COLORS.length];
+}
+
+function touchDebugClear() {
+    touchDebugPointers.clear();
+    document.getElementById('touchDebugBoard')?.querySelectorAll('.touch-debug-dot').forEach((dot) => dot.remove());
+    touchDebugRenderHud();
+}
+
+function touchDebugRenderHud() {
+    const empty = document.getElementById('touchDebugEmpty');
+    const count = document.getElementById('touchDebugCount');
+    const list = document.getElementById('touchDebugList');
+    const total = touchDebugPointers.size;
+    if (empty) empty.hidden = total > 0;
+    if (count) count.textContent = `${total} 点`;
+    if (!list) return;
+    list.replaceChildren();
+    touchDebugPointers.forEach((point, id) => {
+        const item = document.createElement('div');
+        item.className = 'touch-debug-item';
+        item.style.borderColor = point.color;
+        item.textContent = `#${id}  ${Math.round(point.x)}, ${Math.round(point.y)}`;
+        list.appendChild(item);
+    });
+}
+
+function touchDebugUpsert(event) {
+    const board = document.getElementById('touchDebugBoard');
+    if (!board) return;
+    const rect = board.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+    const color = touchDebugColor(event.pointerId);
+    let point = touchDebugPointers.get(event.pointerId);
+    if (!point) {
+        const dot = document.createElement('div');
+        dot.className = 'touch-debug-dot';
+        board.appendChild(dot);
+        point = { x, y, color, dot };
+        touchDebugPointers.set(event.pointerId, point);
+    }
+    point.x = x;
+    point.y = y;
+    point.dot.style.left = `${x}px`;
+    point.dot.style.top = `${y}px`;
+    point.dot.style.borderColor = color;
+    point.dot.textContent = String(event.pointerId);
+    touchDebugRenderHud();
+}
+
+function touchDebugRemove(event) {
+    const point = touchDebugPointers.get(event.pointerId);
+    if (!point) return;
+    point.dot.remove();
+    touchDebugPointers.delete(event.pointerId);
+    touchDebugRenderHud();
+}
+
+function touchDebugOnPointerDown(event) {
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    touchDebugUpsert(event);
+}
+
+function touchDebugOnPointerMove(event) {
+    if (!touchDebugPointers.has(event.pointerId)) return;
+    event.preventDefault();
+    touchDebugUpsert(event);
+}
+
+function touchDebugOnPointerUp(event) {
+    event.preventDefault();
+    touchDebugRemove(event);
+}
+
+function touchDebugOpenPage() {
+    const board = document.getElementById('touchDebugBoard');
+    if (!board) return;
+    touchDebugClear();
+    if (touchDebugBound) return;
+    board.addEventListener('pointerdown', touchDebugOnPointerDown);
+    board.addEventListener('pointermove', touchDebugOnPointerMove);
+    board.addEventListener('pointerup', touchDebugOnPointerUp);
+    board.addEventListener('pointercancel', touchDebugOnPointerUp);
+    touchDebugBound = true;
+}
+
+function touchDebugClosePage() {
+    touchDebugClear();
+}
 
 // 全屏切换
 let fullscreenActive = false;
@@ -7550,14 +7795,14 @@ function pruneStaleWifiNetworks() {
 
 function applyWifiStatusSnapshot(data, { preserveConnecting = false } = {}) {
     if (!data) return false;
-    const previousSsid = wifiStatus.ssid;
+const previousSsid = wifiStatus.ssid;
     const wasConnected = wifiStatus.connected;
-    const wifiEnabled = data.enabled === undefined ? !!data.on : !!data.enabled;
+    const wifiEnabled = !!data.on;
     const ssid = typeof data.ssid === 'string' && data.ssid.length > 0 ? data.ssid : null;
     const hasIp = typeof data.ip === 'string' && data.ip.length > 0;
     const connected = !!data.connected || (wifiEnabled && !!ssid && !data.connecting && (data.mode === 1 || hasIp));
     wifiStatus.mode = data.mode || 0;
-    wifiStatus.on = wifiEnabled || !!data.on || connected;
+    wifiStatus.on = wifiEnabled || connected;
     wifiStatus.connected = connected;
     wifiStatus.connecting = preserveConnecting
         ? (!!data.connecting || !!wifiConnectOperation || (wifiStatus.on && !wifiStatus.connected))
@@ -7596,7 +7841,7 @@ function initWifiStatus() {
             // 更新UI
             const wifiSwitchInput = document.getElementById('wifiSwitchInput');
             const wifiNetworksContainer = document.getElementById('wifiNetworksContainer');
-            const wifiEnabled = data.enabled === undefined ? !!data.on : !!data.enabled;
+            const wifiEnabled = !!data.on;
             if (wifiEnabled) {
                 // WiFi已开启（不强制要求一定在 STA_MODE）
                 wifiSwitchInput.checked = true;
@@ -7653,11 +7898,16 @@ function handleWifiSwitchChange(isOn) {
         scheduleWifiStatusRefresh(0, 20000);
         // 开启WiFi：优先尝试 STA 自动连接（不带 SSID，依赖下位机已保存网络）
         // 如果下位机返回“需要 SSID/无已保存网络”，再退回 MONITOR 扫描模式。
-        sendMessage('wifi', 'getStatus', {}, (statusResponse) => {
+sendMessage('wifi', 'getStatus', {}, (statusResponse) => {
             if (statusResponse.code === 0 && statusResponse.data) {
                 const currentMode = statusResponse.data.mode || 0;
                 if (currentMode === 1 || currentMode === 3) {
                     initWifiStatus();
+                    return;
+                }
+                const storedCount = statusResponse.data.storedCount || 0;
+                if (storedCount === 0) {
+                    switchToMonitorMode();
                     return;
                 }
             }
@@ -8072,9 +8322,7 @@ function switchToStaModeAuto() {
             console.warn('[WiFi] STA 自动连接请求失败:', response);
             sendMessage('wifi', 'getStatus', {}, (statusResponse) => {
                 if (statusResponse.code === 0 && statusResponse.data) {
-                    const wifiEnabled = statusResponse.data.enabled === undefined
-                        ? !!statusResponse.data.on
-                        : !!statusResponse.data.enabled;
+const wifiEnabled = !!statusResponse.data.on;
                     if (wifiEnabled) {
                         applyWifiStatusSnapshot(statusResponse.data, { preserveConnecting: true });
                         document.getElementById('wifiSwitchInput').checked = true;

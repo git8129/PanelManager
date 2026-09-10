@@ -821,8 +821,8 @@
                     <div class="touch-cal-step" id="touchCalStepCoords">
                         <span class="touch-cal-step-index">2</span>
                         <div>
-                            <div class="touch-cal-step-name">坐标采样</div>
-                            <div class="touch-cal-step-desc">依次触摸四个角的目标点</div>
+                            <div class="touch-cal-step-name">坐标校准</div>
+                            <div class="touch-cal-step-desc">四点采样，或改用手动轴向</div>
                         </div>
                     </div>
                     <div class="touch-cal-step" id="touchCalStepDone">
@@ -857,21 +857,41 @@
                             <div class="touch-cal-target" id="touchCalTarget">
                                 <span></span>
                             </div>
-                            <div class="touch-cal-board-center">
+                            <div class="touch-cal-board-center" id="touchCalPointsView">
                                 <div class="touch-cal-kicker">第二步</div>
                                 <h3 id="touchCalPromptTitle">点击“开始采样”</h3>
-                                <p id="touchCalPromptText">开始后，下位机会进入采样模式。请按屏幕上的亮点位置依次触摸四个角，每个角只点一次。</p>
+                                <p id="touchCalPromptText">开始后请按屏幕上的亮点依次触摸四个角，每个角只点一次。用鼠标点按钮。</p>
+                            </div>
+                            <div class="touch-cal-board-center" id="touchCalManualView" hidden>
+                                <div class="touch-cal-kicker">第二步 · 手动</div>
+                                <h3>选择触摸轴向</h3>
+                                <p>打开触控调试，看圆圈是否跟着手指。不对再勾选轴向，用鼠标点按钮。</p>
+                                <div class="touch-cal-axis-list">
+                                    <label class="touch-cal-checkbox">
+                                        <input id="touchCalSwapXy" type="checkbox">
+                                        <span>交换 XY 轴</span>
+                                    </label>
+                                    <label class="touch-cal-checkbox">
+                                        <input id="touchCalMirrorX" type="checkbox">
+                                        <span>左右镜像</span>
+                                    </label>
+                                    <label class="touch-cal-checkbox">
+                                        <input id="touchCalMirrorY" type="checkbox">
+                                        <span>上下镜像</span>
+                                    </label>
+                                </div>
                             </div>
                         </div>
                         <div class="touch-cal-bottom">
                             <div class="touch-cal-progress" id="touchCalProgress"></div>
                             <label class="touch-cal-checkbox">
-                                <input id="touchCal2WriteFlash" type="checkbox" checked>
-                                <span>保存到下位机 Flash</span>
+                                <input id="touchCalManualToggle" type="checkbox" onchange="touchCal2OnManualToggle()">
+                                <span id="touchCalManualToggleLabel">手动校准</span>
                             </label>
                             <div class="touch-cal-actions compact">
-                                <button class="btn-base touch-cal-action touch-cal-action--primary" id="touchCalStartBtn" type="button" onclick="touchCal2Start()">开始采样</button>
-                                <button class="btn-base touch-cal-action touch-cal-action--secondary" id="touchCalStopBtn" type="button" onclick="touchCal2Stop()">停止</button>
+                                <button class="btn-base touch-cal-action touch-cal-action--secondary" id="touchCalDebugBtn" type="button" onclick="touchCal2OpenPreview()" hidden>打开触控调试</button>
+                                <button class="btn-base touch-cal-action touch-cal-action--primary" id="touchCalSampleBtn" type="button" onclick="touchCal2ToggleSample()">开始采样</button>
+                                <button class="btn-base touch-cal-action touch-cal-action--primary" id="touchCalSaveBtn" type="button" onclick="touchCal2Save()" hidden>保存并启用触摸</button>
                             </div>
                         </div>
                         <div class="touch-cal-status" id="touchCalCoordStatus">准备就绪。请先点击“开始采样”。</div>
@@ -883,11 +903,30 @@
                             <h3>触摸坐标已校准</h3>
                             <p id="touchCalDoneText">配置已写入下位机，触摸输出现在使用横屏坐标。</p>
                             <div class="touch-cal-actions">
-                                <button class="btn-base touch-cal-action touch-cal-action--primary" type="button" onclick="touchCal2GoCoordinateStep()">重新校准</button>
                                 <button class="btn-base btn-glass btn-lg" type="button" onclick="closePage()">返回桌面</button>
                             </div>
                         </div>
                     </section>
+                </div>
+            </div>
+        </div>
+
+        <!-- 多点触控调试页面 -->
+        <div class="detail-page glass-xl-md no-dock" id="page-touch-debug">
+            <div class="page-header">
+                <button class="btn-base btn-glass btn-inline" onclick="closePage()">← 返回</button>
+                <h2 class="page-title">多点触控调试</h2>
+            </div>
+            <div class="page-content touch-debug-page">
+                <div class="touch-debug-board panel-dark" id="touchDebugBoard">
+                    <div class="touch-debug-empty" id="touchDebugEmpty">
+                        <div class="touch-debug-empty-title">用手指触摸屏幕</div>
+                        <div class="touch-debug-empty-desc">按下显示触点圆圈，底部列出坐标。</div>
+                    </div>
+                </div>
+                <div class="touch-debug-hud panel-dark">
+                    <div class="touch-debug-count" id="touchDebugCount">0 点</div>
+                    <div class="touch-debug-list" id="touchDebugList"></div>
                 </div>
             </div>
         </div>
@@ -1231,6 +1270,16 @@
                                             </select>
                                         </div>
                                     </div>
+                                    <button class="settings-row settings-row-clickable" type="button" onclick="openPage('touch-debug')">
+                                        <div class="settings-row-label">
+                                            <span class="icon-md">👆</span>
+                                            <span>多点触控调试</span>
+                                        </div>
+                                        <div class="settings-row-value">
+                                            <span>查看触点坐标</span>
+                                            <span class="settings-row-arrow">›</span>
+                                        </div>
+                                    </button>
                                 </div>
                                 <div class="info-card status-led-settings-card">
                                     <div class="status-led-settings-header">
