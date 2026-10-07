@@ -10,9 +10,7 @@
         ShowInTaskbar="False"
         ResizeMode="NoResize"
         Visibility="Hidden"
-        MouseDoubleClick="Window_MouseDoubleClick"
-        MouseLeftButtonDown="Window_MouseLeftButtonDown"
-        Loaded="Window_Loaded">
+        MouseLeftButtonDown="Window_MouseLeftButtonDown">
 
     <Window.Resources>
         <!-- 定义悬停效果的动画 -->

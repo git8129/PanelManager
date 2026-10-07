@@ -65,6 +65,8 @@ namespace PanelManager
             var opencode = app.Services.GetRequiredService<OpenCodeSidecarService>();
             bridge.StartWebSocket(5000);
             HostCommandHandler.Register(bridge, floating, opencode);
+            // 预热隐藏的 companion，避免用户首次最小化时等待 WPF 冷启动。
+            _ = Task.Run(floating.InitializeFloatingWindowProcessAsync);
 
             return app;
         }

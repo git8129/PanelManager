@@ -15,6 +15,8 @@ namespace FloatingWindow
         private readonly string? _floatingSessionToken;
         private readonly System.Windows.Threading.DispatcherTimer _parentWatchTimer;
         private int _commandInProgress;
+        private long _lastClickAt;
+        private Point _lastClickPosition;
         private const string FloatingTokenEnvironmentVariable = "PANELMANAGER_FLOATING_TOKEN";
 
         // Win32 API 导入
@@ -24,6 +26,12 @@ namespace FloatingWindow
 
         [DllImport("user32.dll")]
         private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
+
+        [DllImport("user32.dll")]
+        private static extern uint GetDoubleClickTime();
+
+        [DllImport("user32.dll")]
+        private static extern int GetSystemMetrics(int nIndex);
 
         [StructLayout(LayoutKind.Sequential)]
         private struct RECT
@@ -41,6 +49,8 @@ namespace FloatingWindow
         }
 
         private const uint MONITOR_DEFAULTTONEAREST = 2;
+        private const int SM_CXDOUBLECLK = 36;
+        private const int SM_CYDOUBLECLK = 37;
         private const int SnapThreshold = 80;
         private const int SnapMargin = 8;
 
@@ -70,6 +80,9 @@ namespace FloatingWindow
                 Dispatcher.BeginInvoke(() => Application.Current.Shutdown());
                 return;
             }
+
+            LoadIcon();
+            PositionWindowBottomRight();
 
             // 连接到主程序
             _ = ConnectToMainAppAsync();
@@ -156,15 +169,6 @@ namespace FloatingWindow
             {
                 Dispatcher.Invoke(() => Application.Current.Shutdown());
             }
-        }
-
-        private void Window_Loaded(object sender, RoutedEventArgs e)
-        {
-            // 加载图标
-            LoadIcon();
-
-            // 设置窗口位置到右下角
-            PositionWindowBottomRight();
         }
 
         private void LoadIcon()
@@ -275,8 +279,28 @@ namespace FloatingWindow
             storyboard.Begin();
         }
 
-        private void Window_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        private async void Window_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
+            var now = Environment.TickCount64;
+            var clickPosition = PointToScreen(e.GetPosition(this));
+            var isDoubleClick = _lastClickAt > 0 &&
+                now - _lastClickAt <= GetDoubleClickTime() &&
+                Math.Abs(clickPosition.X - _lastClickPosition.X) <= GetSystemMetrics(SM_CXDOUBLECLK) / 2.0 &&
+                Math.Abs(clickPosition.Y - _lastClickPosition.Y) <= GetSystemMetrics(SM_CYDOUBLECLK) / 2.0;
+            _lastClickAt = 0;
+
+            // DragMove 会重置 WPF 的 ClickCount，因此由窗口 owner 在拖动前判定双击。
+            if (isDoubleClick)
+            {
+                await SendCommandToMainAppAsync("floatingRestore");
+                e.Handled = true;
+                return;
+            }
+
+            _lastClickAt = now;
+            _lastClickPosition = clickPosition;
+            var startLeft = Left;
+            var startTop = Top;
             try
             {
                 DragMove();
@@ -286,6 +310,11 @@ namespace FloatingWindow
                 // 忽略
             }
 
+            if (Math.Abs(Left - startLeft) >= SystemParameters.MinimumHorizontalDragDistance ||
+                Math.Abs(Top - startTop) >= SystemParameters.MinimumVerticalDragDistance)
+            {
+                _lastClickAt = 0;
+            }
             SnapToEdge();
 
             var storyboard = (Storyboard)FindResource("HoverOutAnimation");
@@ -341,7 +370,8 @@ namespace FloatingWindow
 
         private void OnWebSocketEvent(string eventName, System.Text.Json.JsonElement data)
         {
-            string? visibleTransitionId = null;
+            string? transitionId = null;
+            bool? acknowledgedVisibility = null;
             Dispatcher.Invoke(() =>
             {
                 switch (eventName)
@@ -350,15 +380,22 @@ namespace FloatingWindow
                         if (data.ValueKind == System.Text.Json.JsonValueKind.Object &&
                             data.TryGetProperty("transitionId", out var transitionProperty))
                         {
-                            visibleTransitionId = transitionProperty.GetString();
+                            transitionId = transitionProperty.GetString();
                         }
-                        Visibility = Visibility.Visible;
+                        Show();
                         Activate();
                         Topmost = true;
                         UpdateLayout();
+                        acknowledgedVisibility = true;
                         break;
                     case "floatingHide":
-                        Visibility = Visibility.Hidden;
+                        if (data.ValueKind == System.Text.Json.JsonValueKind.Object &&
+                            data.TryGetProperty("transitionId", out var hideTransitionProperty))
+                        {
+                            transitionId = hideTransitionProperty.GetString();
+                        }
+                        Hide();
+                        acknowledgedVisibility = false;
                         break;
                     case "floatingClose":
                         Close();
@@ -366,12 +403,12 @@ namespace FloatingWindow
                 }
             });
 
-            if (eventName == "floatingShow" && !string.IsNullOrEmpty(visibleTransitionId))
+            if (acknowledgedVisibility.HasValue && !string.IsNullOrEmpty(transitionId))
             {
                 _ = _wsClient?.SendRequestAsync(
                     "System",
                     "floatingVisible",
-                    new { transitionId = visibleTransitionId, visible = true });
+                    new { transitionId, visible = acknowledgedVisibility.Value });
             }
         }
 
@@ -385,7 +422,7 @@ namespace FloatingWindow
 
         private void OnWebSocketDisconnected()
         {
-            Dispatcher.Invoke(() => Visibility = Visibility.Hidden);
+            Dispatcher.Invoke(Hide);
         }
 
         private async Task SendCommandToMainAppAsync(string action)
@@ -395,11 +432,28 @@ namespace FloatingWindow
                 return;
             }
 
+            var restoreCommand = string.Equals(action, "floatingRestore", StringComparison.Ordinal);
+            WebSocketResponse? response = null;
             try
             {
+                // 恢复命令先隐藏自身；主程序确认 hidden 后才显示，避免两个窗口重叠。
+                if (restoreCommand)
+                {
+                    Hide();
+                }
                 if (_wsClient != null)
                 {
-                    await _wsClient.SendRequestAsync("System", action, null, 5000);
+                    response = await _wsClient.SendRequestAsync(
+                        "System",
+                        action,
+                        null,
+                        restoreCommand ? 2500 : 5000);
+                }
+                // 超时可能只是成功响应丢失；仅明确失败时才重显，避免与已恢复的主窗重叠。
+                if (restoreCommand && response is { Code: not 0 } && _wsClient?.IsConnected == true)
+                {
+                    Show();
+                    Activate();
                 }
             }
             finally
@@ -413,12 +467,6 @@ namespace FloatingWindow
             _parentWatchTimer.Stop();
             _ = _wsClient?.DisconnectAsync();
             base.OnClosed(e);
-        }
-
-        private async void Window_MouseDoubleClick(object sender, MouseButtonEventArgs e)
-        {
-            await SendCommandToMainAppAsync("floatingRestore");
-            e.Handled = true;
         }
 
         // 右键菜单事件处理

@@ -35,7 +35,9 @@ namespace PanelManager.WinUI
         private const int WS_EX_APPWINDOW = 0x00040000;   // 在任务栏显示
         private const int WS_MAXIMIZEBOX = 0x00010000;    // 最大化按钮
         private const int WM_SYSCOMMAND = 0x0112;
+        private const int WM_NCLBUTTONDBLCLK = 0x00A3;
         private const int SC_MINIMIZE = 0xF020;
+        private const int SC_MAXIMIZE = 0xF030;
         private const int GWL_WNDPROC = -4;
         private const int SW_SHOWNORMAL = 1;
         private const int SW_RESTORE = 9;
@@ -206,6 +208,12 @@ namespace PanelManager.WinUI
                     // 3) 禁用最大化/缩放
                     if (_appWindow.Presenter is OverlappedPresenter presenter)
                     {
+                        // 旧版本可能把最大化状态持久到窗口恢复流程；启动时先恢复，
+                        // 否则即使禁用最大化按钮，固定尺寸窗口仍会以最大化状态出现。
+                        if (presenter.State == OverlappedPresenterState.Maximized)
+                        {
+                            presenter.Restore();
+                        }
                         presenter.IsMaximizable = false;
                         presenter.IsResizable = false;
                     }
@@ -575,10 +583,22 @@ namespace PanelManager.WinUI
 
         private static IntPtr NewWndProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
         {
+            // WinUI 的 IsMaximizable=false 只控制按钮状态，标题栏双击仍可能
+            // 进入系统最大化流程；这里在消息层硬拦截，保证固定窗口尺寸。
+            if (msg == WM_NCLBUTTONDBLCLK)
+            {
+                return IntPtr.Zero;
+            }
+
             // 拦截系统命令
             if (msg == WM_SYSCOMMAND)
             {
                 var command = wParam.ToInt32() & 0xFFF0;
+
+                if (command == SC_MAXIMIZE)
+                {
+                    return IntPtr.Zero;
+                }
                 
                 // 拦截最小化命令
                 if (command == SC_MINIMIZE)
