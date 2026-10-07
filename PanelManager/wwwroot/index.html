@@ -2188,7 +2188,7 @@
                 <div class="about-logo-section">
                     <div class="about-icon-large">📱</div>
                     <div class="about-title-large">Smart Touch Panel</div>
-                    <div class="about-version-large">版本 v1.0.0</div>
+                    <div class="about-version-large" id="hostAppVersion">版本读取中…</div>
                     <div class="about-description">
                         智能触控屏控制系统，为您的设备提供强大的触控交互体验
                     </div>
@@ -2317,6 +2317,20 @@
             </div>
         </div>
     </div>
+    <dialog id="appUpdateDialog" class="ui-panel app-update-dialog" aria-labelledby="appUpdateTitle" aria-describedby="appUpdateVersion">
+        <div class="ui-stack">
+            <h3 id="appUpdateTitle" class="ui-section-title">PanelManager 软件更新</h3>
+            <p id="appUpdateVersion" class="ui-field-hint"></p>
+            <pre id="appUpdateNotes" class="ui-field-hint app-update-notes"></pre>
+            <p class="ui-field-hint">确认后将下载安装包并启动安装程序；安装器就绪后，PanelManager 自动退出，由安装器完成后续步骤。</p>
+            <p id="appUpdateMessage" class="ui-field-hint" role="status" aria-live="polite"></p>
+            <progress id="appUpdateProgress" class="app-update-progress" value="0" max="100" aria-label="软件更新下载进度" hidden></progress>
+            <div class="ui-actions">
+                <button id="appUpdateCancel" type="button" class="ui-button ui-button--secondary">稍后再说</button>
+                <button id="appUpdateConfirm" type="button" class="ui-button ui-button--primary">下载并运行安装包</button>
+            </div>
+        </div>
+    </dialog>
     <!-- Toast通知 -->
     <div class="toast" id="toast"></div>
     <script>
@@ -2332,6 +2346,7 @@
     <script src="ui_apps.js"></script>
     <script src="ui_misc.js"></script>
     <script src="script.js"></script>
+    <script src="ui_app_update.js"></script>
 </body>
 
 </html>

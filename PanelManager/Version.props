@@ -1,0 +1,8 @@
+<Project>
+  <PropertyGroup>
+    <!-- 软件版本唯一来源；发布时必须与 GitHub 正式 Release 标签一致。 -->
+    <ApplicationDisplayVersion>1.1.4</ApplicationDisplayVersion>
+    <ApplicationVersion>114</ApplicationVersion>
+    <Version>$(ApplicationDisplayVersion)</Version>
+  </PropertyGroup>
+</Project>

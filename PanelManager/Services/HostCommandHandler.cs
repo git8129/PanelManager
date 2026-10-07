@@ -33,7 +33,8 @@ public static class HostCommandHandler
         public static void Register(
             MessageBridge bridge,
             FloatingWindowManager floatingWindowManager,
-            OpenCodeSidecarService openCode)
+            OpenCodeSidecarService openCode,
+            AppUpdateService appUpdate)
         {
             floatingWindowManager.AttachBridge(bridge);
 
@@ -59,8 +60,28 @@ public static class HostCommandHandler
             bridge.On(Module.System, "status", _ => new
             {
                 serial = new { open = bridge.IsSerialConnected, physicalOpen = bridge.IsSerialOpen, port = bridge.CurrentPort, usbId = bridge.CurrentUsbId },
-                version = "1.0.0",
+                version = AppReleasePolicy.CurrentVersionText,
                 bootNotice = MessageBridgeText.GetBootNotice()
+            });
+
+            // 软件更新命令只做有界状态读取/启动确认，下载由独立 owner 执行。
+            bridge.On(Module.System, "appUpdateStatus", msg =>
+            {
+                appUpdate.Start(); // UI 首次就绪兜底；owner 保证整个进程只启动一次延迟检查。
+                return msg.Ok(appUpdate.GetStatus());
+            });
+            bridge.On(Module.System, "appUpdateInstall", msg =>
+            {
+                var version = msg.Data is { ValueKind: JsonValueKind.Object } data && data.TryGetProperty("version", out var tag)
+                    && tag.ValueKind == JsonValueKind.String ? tag.GetString() : null;
+                return appUpdate.TryInstall(version)
+                    ? msg.Ok(new { accepted = true })
+                    : msg.Fail(ErrorCode.Busy, "软件更新状态已变化或安装器仍在运行，请刷新状态后重试。");
+            });
+            bridge.On(Module.System, "appUpdateDismiss", msg =>
+            {
+                appUpdate.DismissOrCancel();
+                return msg.Ok(appUpdate.GetStatus());
             });
 
             // ===== AI (OpenCode sidecar) =====

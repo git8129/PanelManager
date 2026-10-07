@@ -53,6 +53,7 @@ function initWebSocket() {
             // 连接后主动刷新天气
             refreshWeather(false);
             setTimeout(refreshCurrentFirmwareVersion, 300);
+            window.AppUpdateUI?.refresh();
         };
         ws.onmessage = (event) => {
             try {
@@ -293,6 +294,10 @@ function handleEvent(message) {
                 updateSerialStatusBar(false);
                 setCurrentFirmwareDisconnected();
             }
+            break;
+
+        case 'system:appUpdateStatus':
+            window.AppUpdateUI?.handle(message.data);
             break;
 
         case 'system:aiSidecarProgress':

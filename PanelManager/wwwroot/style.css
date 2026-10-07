@@ -5433,6 +5433,33 @@ body {
     text-align: center;
 }
 
+.app-update-dialog {
+    width: min(760px, calc(100vw - 48px));
+    max-height: calc(100vh - 48px);
+    margin: auto;
+    overflow-y: auto;
+    padding: var(--ui-space-6);
+    color: var(--ui-color-text);
+    background: var(--ui-color-surface);
+}
+
+.app-update-dialog::backdrop {
+    background: rgba(0, 0, 0, 0.5);
+}
+
+.app-update-notes {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-height: 240px;
+    overflow-y: auto;
+    font-family: inherit;
+}
+
+.app-update-progress {
+    width: 100%;
+    accent-color: var(--ui-color-primary);
+}
+
 /* ========== 性能监控 ========== */
 .monitor-grid {
     display: grid;

@@ -56,6 +56,7 @@ namespace PanelManager
             builder.Services.AddSingleton<MessageBridge>();
             builder.Services.AddSingleton<FloatingWindowManager>();
             builder.Services.AddSingleton<OpenCodeSidecarService>();
+            builder.Services.AddSingleton<AppUpdateService>();
 
             var app = builder.Build();
 
@@ -63,8 +64,9 @@ namespace PanelManager
             var bridge = app.Services.GetRequiredService<MessageBridge>();
             var floating = app.Services.GetRequiredService<FloatingWindowManager>();
             var opencode = app.Services.GetRequiredService<OpenCodeSidecarService>();
+            var appUpdate = app.Services.GetRequiredService<AppUpdateService>();
             bridge.StartWebSocket(5000);
-            HostCommandHandler.Register(bridge, floating, opencode);
+            HostCommandHandler.Register(bridge, floating, opencode, appUpdate);
             // 预热隐藏的 companion，避免用户首次最小化时等待 WPF 冷启动。
             _ = Task.Run(floating.InitializeFloatingWindowProcessAsync);
 

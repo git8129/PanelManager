@@ -2,6 +2,7 @@ using Microsoft.UI;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.Maui.ApplicationModel;
+using Microsoft.Extensions.DependencyInjection;
 using System;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -223,6 +224,8 @@ namespace PanelManager.WinUI
 
                     EnsureWindowVisibleOnTop(currentWindow);
                     StartSecondLaunchListener();
+                    // 只由已取得单实例的窗口启动延迟检查，重复进程和提权前的父进程不联网。
+                    mauiApp?.Handler?.MauiContext?.Services.GetService<PanelManager.Services.AppUpdateService>()?.Start();
                 }
             }
             catch (Exception ex)

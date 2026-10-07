@@ -13,6 +13,8 @@ internal sealed class InstallerState
     public required InstallerText Text { get; init; }
     public required bool UninstallMode { get; init; }
     public required IntPtr Hwnd { get; init; }
+    public string? UpdateInstallDirectory { get; init; }
+    public string? UpdateReadyEventName { get; init; }
     public IntPtr PathTextBox { get; set; }
     public IntPtr BrowseButton { get; set; }
     public IntPtr DesktopShortcutCheck { get; set; }
@@ -137,6 +139,7 @@ internal static class Program
 
     private const int WM_APP_PROGRESS = 0x8001;
     private const int WM_APP_COMPLETE = 0x8002;
+    private const int WM_APP_UPDATE_READY = 0x8003;
 
     [SupportedOSPlatform("windows")]
     [STAThread]
@@ -144,6 +147,7 @@ internal static class Program
     {
         var uninstallMode = args.Any(a => string.Equals(a, "/uninstall", StringComparison.OrdinalIgnoreCase));
         var text = InstallerText.Create();
+        var updateArguments = uninstallMode ? (Directory: (string?)null, ReadyEvent: (string?)null) : ParseUpdateArguments(args);
 
         var hInstance = Win32.GetModuleHandle(null);
         var classNamePtr = Marshal.StringToHGlobalUni(WindowClassName);
@@ -196,6 +200,8 @@ internal static class Program
             Text = text,
             UninstallMode = uninstallMode,
             Hwnd = hwnd,
+            UpdateInstallDirectory = updateArguments.Directory,
+            UpdateReadyEventName = updateArguments.ReadyEvent,
             IsDarkMode = isDarkMode,
             BackgroundBrush = isDarkMode ? bgBrush : Win32.GetSysColorBrush(Win32.COLOR_WINDOW),
             PanelBrush = panelBrush,
@@ -208,6 +214,7 @@ internal static class Program
         CenterWindow(hwnd);
         Win32.ShowWindow(hwnd, Win32.SW_SHOW);
         Win32.UpdateWindow(hwnd);
+        Win32.PostMessage(hwnd, WM_APP_UPDATE_READY, IntPtr.Zero, IntPtr.Zero);
 
         while (Win32.GetMessage(out var msg, IntPtr.Zero, 0, 0) > 0)
         {
@@ -221,6 +228,44 @@ internal static class Program
         }
         if (isDarkMode) Win32.DeleteObject(bgBrush);
         Win32.DeleteObject(panelBrush);
+    }
+
+    private static (string? Directory, string? ReadyEvent) ParseUpdateArguments(string[] args)
+    {
+        string? Option(string name)
+        {
+            var index = Array.FindIndex(args, value => value.Equals(name, StringComparison.OrdinalIgnoreCase));
+            return index >= 0 && index + 1 < args.Length ? args[index + 1] : null;
+        }
+        var eventName = Option("/update-ready-event");
+        var directory = Option("/update-dir");
+        const string prefix = @"Local\PanelManager.UpdateReady.";
+        if (eventName == null || !eventName.StartsWith(prefix, StringComparison.Ordinal)
+            || !Guid.TryParseExact(eventName[prefix.Length..], "N", out _) || string.IsNullOrWhiteSpace(directory))
+            return (null, null);
+        try
+        {
+            if (!Path.IsPathFullyQualified(directory)) return (null, null);
+            directory = Path.GetFullPath(directory);
+            return File.Exists(Path.Combine(directory, AppExeName)) ? (directory, eventName) : (null, null);
+        }
+        catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException)
+        {
+            return (null, null);
+        }
+    }
+
+    internal static void OnUpdateReady(InstallerState state)
+    {
+        if (state.UpdateReadyEventName == null) return;
+        try
+        {
+            // 此消息在窗口初始化完成且消息循环运行后处理。主程序收到确认前不得退出。
+            using var ready = EventWaitHandle.OpenExisting(state.UpdateReadyEventName);
+            ready.Set();
+        }
+        catch (WaitHandleCannotBeOpenedException) { }
+        catch (UnauthorizedAccessException) { }
     }
 
     private static bool IsSystemDarkMode()
@@ -291,7 +336,7 @@ internal static class Program
             state.PathTextBox = Win32.CreateWindowEx(
                 Win32.WS_EX_CLIENTEDGE,
                 "EDIT",
-                GetDefaultInstallDir(),
+                state.UpdateInstallDirectory ?? GetDefaultInstallDir(),
                 Win32.WS_CHILD | Win32.WS_VISIBLE | Win32.ES_AUTOHSCROLL,
                 36, 138,
                 412, 26,
@@ -712,7 +757,8 @@ internal static class Program
         using var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(UninstallRegKey);
         key.SetValue("DisplayName", AppName);
         key.SetValue("DisplayIcon", appExe);
-        key.SetValue("DisplayVersion", "1.0");
+        var version = Assembly.GetExecutingAssembly().GetName().Version;
+        key.SetValue("DisplayVersion", version == null ? "1.1.4" : version.ToString(version.Revision > 0 ? 4 : 3));
         key.SetValue("Publisher", "PanelManager");
         key.SetValue("InstallLocation", installDir);
         key.SetValue("UninstallString", $"\"{uninstallerExe}\" /uninstall");
@@ -1120,6 +1166,12 @@ internal static class Win32
             }
             SetBkMode(wParam, TRANSPARENT);
             return GetSysColorBrush(COLOR_WINDOW);
+        }
+
+        if (msg == 0x8003) // WM_APP_UPDATE_READY
+        {
+            Program.OnUpdateReady(GetState(hwnd));
+            return IntPtr.Zero;
         }
 
         if (msg == WM_APP_PROGRESS)
