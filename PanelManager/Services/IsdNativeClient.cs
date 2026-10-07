@@ -192,7 +192,7 @@ internal static class IsdNativeClient
                 Size = (uint)Marshal.SizeOf<NativeDownloadOptions>(),
                 Version = AbiVersion,
                 Flags = AllowDestructive | (preserveUserData ? 0u : EraseEntireFlash),
-                DeviceWaitTimeoutSeconds = 45,
+                DeviceWaitTimeoutSeconds = 15,
                 NormalModeTimeoutSeconds = 600,
                 JournalPathUtf8 = journalPathUtf8,
                 ProgressCallback = progress is null

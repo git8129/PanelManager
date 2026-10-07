@@ -1198,6 +1198,14 @@ namespace PanelManager.Services
             // 根据目标路由
             if (msg.Target == Target.Host)
             {
+#if DEBUG
+                // 仅 Debug 本机 bridge 用于自动化刷写；Release 不暴露 capability。
+                if (msg.Module == Module.System && msg.Cmd == "debugHostCapability")
+                {
+                    await SendWebMessageAsync(socket, msg.Ok(new { capability = PanelManagerHostCapability.Token }).ToJson());
+                    return;
+                }
+#endif
                 if (IsFloatingOnlyCommand(msg))
                 {
                     await SendWebMessageAsync(

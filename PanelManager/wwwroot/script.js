@@ -12649,12 +12649,16 @@ const secureUpdateDetailLabels = {
     'metadata received': '已获取固件元数据',
     'metadata signature verified': '固件签名验证通过',
     'manifest validated': '版本清单验证完成',
-    'downloaded and verified; ready to install': '固件下载并校验完成，等待安装'
+    'downloaded and verified; ready to install': '固件下载并校验完成，等待安装',
+    'already up to date': '已是最新版本',
+    'new version available': '发现新版本'
 };
 
 function localizeSecureUpdateDetail(detail) {
     if (!detail) return '';
-    if (secureUpdateDetailLabels[detail]) return secureUpdateDetailLabels[detail];
+    const mapped = secureUpdateDetailLabels[detail] ||
+        secureUpdateDetailLabels[String(detail).toLowerCase()];
+    if (mapped) return mapped;
     const sourceMatch = /^connecting source (\d+)\/(\d+)$/.exec(detail);
     return sourceMatch
         ? `正在连接更新源 ${sourceMatch[1]}/${sourceMatch[2]}...`
@@ -12694,6 +12698,7 @@ function finishSecureUpdateCheck(code, message, data) {
 
     checkUpdateBtn.disabled = false;
     checkUpdateBtn.style.opacity = '1';
+    message = localizeSecureUpdateDetail(message) || message;
     if (code === 0) {
         renderSecureUpdateCheckProgress(
             100,

@@ -11,6 +11,17 @@ namespace PanelManager
             InitializeComponent();
         }
 
+        private void OnBlazorWebViewInitializing(object? sender, BlazorWebViewInitializingEventArgs e)
+        {
+#if WINDOWS && DEBUG
+            // WebView owner 显式传入选项，避免进程环境变量未传递给浏览器时丢失 CDP。
+            e.EnvironmentOptions ??= new Microsoft.Web.WebView2.Core.CoreWebView2EnvironmentOptions();
+            var arguments = e.EnvironmentOptions.AdditionalBrowserArguments ?? string.Empty;
+            if (!arguments.Contains("--remote-debugging-port", StringComparison.OrdinalIgnoreCase))
+                e.EnvironmentOptions.AdditionalBrowserArguments = arguments + " --remote-debugging-port=9222";
+#endif
+        }
+
         private async void OnBlazorWebViewInitialized(
             object? sender,
             BlazorWebViewInitializedEventArgs e)
