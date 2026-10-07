@@ -661,13 +661,8 @@ function handleEvent(message) {
             console.log('[WiFi] 已初始化:', message.data);
             showToast('WiFi 模块已初始化');
             // 初始化完成后获取 WiFi 状态
-            sendMessage('wifi', 'getStatus', {}, (response) => {
-                if (response.code === 0 && response.data) {
-                    applyWifiStatusSnapshot(response.data);
-                    updateWifiStatusBar();
-                    renderWifiList();
-                }
-            });
+            if (isWifiSettingsActive()) scheduleWifiStatusRefresh(WIFI_SCAN_BUSY_RETRY_MS);
+            else initWifiStatus();
             break;
         case 'wifi:modeChanged':
             // WiFi 模式变化
@@ -700,7 +695,6 @@ function handleEvent(message) {
             // 扫描完成
             console.log('[WiFi] 扫描完成:', message.data);
             clearWifiScanWatchdog();
-            wifiStatus.scanning = false;
             if (wifiActiveScanNetworks) {
                 wifiActiveScanNetworks = null;
             }
@@ -710,16 +704,14 @@ function handleEvent(message) {
                 pruneStaleWifiNetworks();
             }
             renderWifiList();
-            startPendingWifiConnection();
-            if (!wifiConnectOperation) startWifiAutoScan();
+            scheduleWifiStatusRefresh(WIFI_SCAN_BUSY_RETRY_MS);
             break;
         case 'wifi:completion':
             if (message.data?.cmd === 'startScan') {
                 clearWifiScanWatchdog();
-                wifiStatus.scanning = false;
-                if (message.data.code && message.data.code !== 0 && !wifiConnectOperation) {
-                    startWifiAutoScan();
-                }
+                // WiFi 页负责收尾：两种终结事件可能重复或迟到，必须查询 owner
+                // 快照再续扫，不能让旧事件清空新扫描状态。
+                scheduleWifiStatusRefresh(WIFI_SCAN_BUSY_RETRY_MS);
             }
             break;
         case 'wifi:connected':
@@ -732,30 +724,31 @@ function handleEvent(message) {
                 }
                 console.log('[WiFi] 连接成功:', message.data);
                 wifiStatus.on = true;
-                wifiStatus.connected = true;
-                wifiStatus.connecting = false;
+                wifiStatus.connected = hasWifiIp(message.data.ip);
+                wifiStatus.connecting = !wifiStatus.connected;
                 wifiStatus.ssid = message.data.ssid;
-                wifiStatus.ip = message.data.ip;
+                wifiStatus.ip = hasWifiIp(message.data.ip) ? message.data.ip : null;
+                wifiStatus.waitingForIp = !wifiStatus.connected;
                 wifiStatus.rssi = normalizeWifiRssi(message.data.rssi)
                     ?? normalizeWifiRssi(wifiNetworks.find(network => network.ssid === message.data.ssid)?.rssi);
                 wifiConnectionFailure = null;
                 ensureConnectedWifiVisible();
-                finishWifiConnection(message.data.ssid);
-                stopWifiStatusRefresh();
-                startWifiAutoScan(0);
+                if (wifiStatus.connected) {
+                    finishWifiConnection(message.data.ssid);
+                    stopWifiStatusRefresh();
+                    startWifiAutoScan(0);
+                } else {
+                    scheduleWifiStatusRefresh();
+                }
                 updateWifiStatusBar();
                 // 更新网络列表
                 renderWifiList();
                 setTimeout(() => {
                     if (!isWifiSettingsActive() || !wifiStatus.connected || wifiStatus.ssid !== message.data.ssid) return;
-                    sendMessage('wifi', 'getStatus', {}, (response) => {
-                        if (response.code !== 0 || !response.data) return;
-                        applyWifiStatusSnapshot(response.data);
-                        updateWifiStatusBar();
-                        renderWifiList();
-                    });
+                    initWifiStatus();
                 }, 500);
-                showToast(`已连接到 ${message.data.ssid}`);
+                showToast(wifiStatus.connected ? `已获取 IP，已连接到 ${message.data.ssid}`
+                    : `${message.data.ssid}：等待获取 IP 地址`);
             }
             break;
         case 'wifi:disconnected':
@@ -764,6 +757,7 @@ function handleEvent(message) {
                 console.log('[WiFi] 断开连接:', message.data);
                 const disconnectedSsid = message.data.ssid || wifiStatus.ssid;
                 wifiStatus.connected = false;
+                wifiStatus.waitingForIp = false;
                 if (!wifiConnectOperation) {
                     wifiStatus.connecting = false;
                 }
@@ -787,19 +781,22 @@ function handleEvent(message) {
                 }
                 console.log('[WiFi] 连接失败:', message.data);
                 wifiConnectionFailure = {
-                    ssid: message.data.ssid || wifiConnectOperation?.ssid || '',
+                    ssid: message.data.ssid || wifiConnectOperation?.ssid || wifiStatus.ssid || '',
                     reason: formatWifiConnectionFailure(message.data.reason)
                 };
+                wifiStatus.connected = false;
+                wifiStatus.waitingForIp = false;
+                wifiStatus.ip = null;
                 failWifiConnection(message.data.ssid);
-                showToast(`连接 ${message.data.ssid} 失败: ${message.data.reason || '未知原因'}`);
+                showToast(`连接 ${wifiConnectionFailure.ssid} 失败: ${wifiConnectionFailure.reason}`);
             }
             break;
         case 'wifi:dhcpSuccess':
             // DHCP 成功
             if (message.data) {
                 console.log('[WiFi] DHCP 成功:', message.data);
-                wifiStatus.ip = message.data.ip;
-                showToast(`获取 IP 地址: ${message.data.ip}`);
+                // DHCP 事件无 SSID/事务标识，由设备快照确认归属，禁止给新连接套用旧 IP。
+                initWifiStatus();
             }
             break;
         case 'wifi:clientConnected':
@@ -7727,6 +7724,7 @@ let wifiStatus = {
     enabled: false,
     connected: false,
     connecting: false,
+    waitingForIp: false,
     ssid: null,
     ip: null,
     mac: null,
@@ -7744,6 +7742,16 @@ function updateWifiStatusBar() {
     const el = document.getElementById('wifiStatus');
     const icon = document.getElementById('wifiStatusIcon');
     if (!el || !icon) return;
+    const pendingLabel = wifiStatus.on && wifiStatus.waitingForIp ? '等待获取 IP 地址'
+        : !wifiStatus.connected && !wifiStatus.connecting ? wifiConnectionFailure?.reason : null;
+    if (pendingLabel) {
+        el.textContent = pendingLabel;
+        icon.dataset.level = '0';
+        icon.classList.remove('connected');
+        icon.title = `Wi-Fi ${pendingLabel}`;
+        icon.setAttribute('aria-label', icon.title);
+        return;
+    }
     if (wifiStatus.connected && wifiStatus.ssid) {
         el.textContent = wifiStatus.ssid;
         const scannedRssi = wifiNetworks.find(network => network.ssid === wifiStatus.ssid)?.rssi;
@@ -7783,6 +7791,15 @@ let wifiScanSessionExpired = false;
 let wifiScanSessionNeedsImmediateScan = false;
 let wifiBusyRecoveryTimer = null;
 let wifiScanWatchdogTimer = null;
+let wifiSwitchGeneration = 0;
+let wifiDesiredOn = null;
+let wifiEnablePending = false;
+let wifiStatusGeneration = 0;
+let wifiStatusRequest = null;
+let wifiScanRequest = null;
+const WIFI_STATUS_TIMEOUT_MS = 2000;
+const WIFI_STATUS_RECOVERY_MS = 20000;
+const WIFI_MODE_TIMEOUT_MS = 35000;
 const WIFI_SCAN_DISCONNECTED_INTERVAL_MS = 5000;
 const WIFI_SCAN_CONNECTED_INTERVAL_MS = 5000;
 const WIFI_SCAN_BUSY_RETRY_MS = 1000;
@@ -7840,36 +7857,25 @@ function stopWifiStatusRefresh() {
     wifiStatusRefreshDeadline = 0;
 }
 
-function scheduleWifiStatusRefresh(delayMs = 0, durationMs = 20000) {
-    if (!isWifiSettingsActive()) return;
-    if (!wifiStatusRefreshDeadline || durationMs > 0) {
-        wifiStatusRefreshDeadline = Date.now() + durationMs;
+function scheduleWifiStatusRefresh(delayMs = 0, durationMs = WIFI_STATUS_RECOVERY_MS) {
+    if (!isWifiSettingsActive() || !wifiScanSessionDeadline || wifiDesiredOn === false) return;
+    // WiFi 页负责恢复；重复事件不得延长失败窗口，避免故障时无限请求。
+    if (!wifiStatusRefreshDeadline) {
+        wifiStatusRefreshDeadline = Math.min(wifiScanSessionDeadline,
+            Date.now() + durationMs);
     }
-    if (wifiStatusRefreshTimer) clearTimeout(wifiStatusRefreshTimer);
+    pauseWifiAutoScan();
+    if (Date.now() >= wifiStatusRefreshDeadline) return;
+    if (wifiStatusRefreshTimer || wifiStatusRequest) return;
     wifiStatusRefreshTimer = setTimeout(() => {
         wifiStatusRefreshTimer = null;
-        if (!isWifiSettingsActive() || !isWifiIntentOn()) {
-            stopWifiStatusRefresh();
-            return;
-        }
-        sendMessage('wifi', 'getStatus', {}, (response) => {
-            if (response.code === 0 && response.data) {
-                applyWifiStatusSnapshot(response.data, { preserveConnecting: true });
-                updateWifiStatusBar();
-                renderWifiList();
-                if (wifiStatus.connected) {
-                    stopWifiStatusRefresh();
-                    startWifiAutoScan(0);
-                    return;
-                }
-            }
-            if (Date.now() < wifiStatusRefreshDeadline) {
-                scheduleWifiStatusRefresh(1000, 0);
-            } else {
-                stopWifiStatusRefresh();
-            }
-        });
-    }, Math.max(0, delayMs));
+        if (Date.now() < wifiStatusRefreshDeadline) initWifiStatus();
+    }, Math.min(Math.max(0, delayMs), wifiStatusRefreshDeadline - Date.now()));
+}
+function hasWifiIp(value) {
+    return typeof value === 'string' && /^(\d{1,3}\.){3}\d{1,3}$/.test(value)
+        && value.split('.').every(part => Number(part) <= 255)
+        && value !== '0.0.0.0' && value !== '255.255.255.255';
 }
 
 function syncWifiSavedSsids(data) {
@@ -7914,7 +7920,7 @@ function upsertWifiNetwork(network) {
 }
 
 function ensureConnectedWifiVisible() {
-    if (!wifiStatus.connected || !wifiStatus.ssid) return false;
+    if ((!wifiStatus.connected && !wifiStatus.connecting) || !wifiStatus.ssid) return false;
     return upsertWifiNetwork({
         ssid: wifiStatus.ssid,
         bssid: null,
@@ -7951,7 +7957,8 @@ function pruneStaleWifiNetworks() {
 }
 
 function isWifiIntentOn() {
-    return !!(wifiStatus.enabled || wifiStatus.on);
+    if (wifiDesiredOn === false) return false;
+    return wifiEnablePending || !!(wifiStatus.enabled || wifiStatus.on);
 }
 
 function applyWifiStatusSnapshot(data, { preserveConnecting = false } = {}) {
@@ -7961,17 +7968,25 @@ function applyWifiStatusSnapshot(data, { preserveConnecting = false } = {}) {
     const radioOn = !!data.on;
     const enabled = data.enabled !== undefined ? !!data.enabled : radioOn;
     const ssid = typeof data.ssid === 'string' && data.ssid.length > 0 ? data.ssid : null;
-    const hasIp = typeof data.ip === 'string' && data.ip.length > 0;
-    const connected = !!data.connected || (radioOn && !!ssid && !data.connecting && (data.mode === 1 || hasIp));
+    const hasIp = hasWifiIp(data.ip);
+    // WiFi UI owner：SSID/STA 模式不证明关联或 DHCP 成功；显式 false 不得被推断覆盖。
+    const connected = hasIp && (data.connected === true ||
+        (data.connected === undefined && radioOn && !!ssid && !data.connecting));
+    wifiStatus.waitingForIp = data.connected === true && !hasIp &&
+        !(wifiConnectionFailure?.ssid === ssid && !data.connecting);
     wifiStatus.mode = data.mode || 0;
     wifiStatus.enabled = enabled || connected;
     wifiStatus.on = radioOn || connected;
     wifiStatus.connected = connected;
-    wifiStatus.connecting = !!data.connecting || !!wifiConnectOperation;
+    wifiStatus.connecting = !!data.connecting || wifiStatus.waitingForIp || !!wifiConnectOperation;
     wifiStatus.scanning = !!data.scanning;
     syncWifiSavedSsids(data);
     wifiStatus.ssid = ssid;
-    wifiStatus.ip = data.ip || null;
+    wifiStatus.ip = hasIp ? data.ip : null;
+    if (connected) {
+        wifiConnectionFailure = null;
+        if (wifiConnectOperation?.ssid === ssid) finishWifiConnection(ssid);
+    }
     wifiStatus.mac = data.mac || wifiStatus.mac || null;
     wifiStatus.rssi = normalizeWifiRssi(data.rssi);
     if (wasConnected && !wifiStatus.connected) {
@@ -7985,7 +8000,14 @@ function initWifiStatus() {
     if (isWifiSettingsActive() && !wifiScanSessionDeadline && !wifiScanSessionExpired) {
         beginWifiScanSession();
     }
-    sendMessage('wifi', 'getStatus', {}, (response) => {
+    if (wifiStatusRequest) return;
+    if (isWifiSettingsActive() && wifiStatusRefreshDeadline &&
+        Date.now() >= wifiStatusRefreshDeadline) return;
+    const request = { generation: wifiStatusGeneration };
+    wifiStatusRequest = request;
+    sendMessageWithTimeout('wifi', 'getStatus', {}, WIFI_STATUS_TIMEOUT_MS, (response) => {
+        if (wifiStatusRequest !== request || request.generation !== wifiStatusGeneration) return;
+        wifiStatusRequest = null;
         if (response.code === 0 && response.data) {
             const data = response.data;
             applyWifiStatusSnapshot(data);
@@ -8002,20 +8024,30 @@ function initWifiStatus() {
             // 更新UI
             const wifiSwitchInput = document.getElementById('wifiSwitchInput');
             const wifiNetworksContainer = document.getElementById('wifiNetworksContainer');
-            const wifiEnabled = !!(data.enabled || data.on || data.mode);
+            const wifiEnabled = isWifiIntentOn();
             if (wifiEnabled) {
                 // 开关跟 enabled；射频 STARTING/recovery 时 on 可能为 false，仍显示列表并扫描。
                 wifiSwitchInput.checked = true;
                 wifiNetworksContainer.style.display = 'block';
                 updateWifiStatusBar();
                 if (isWifiSettingsActive()) {
-                    const initialDelay = wifiScanSessionNeedsImmediateScan ? 0 : undefined;
-                    wifiScanSessionNeedsImmediateScan = false;
-                    startWifiAutoScan(initialDelay);
+                    if (wifiStatus.connecting || wifiStatus.scanning || wifiScanRequest ||
+                        (wifiEnablePending && !data.enabled && !data.on)) {
+                        scheduleWifiStatusRefresh(WIFI_SCAN_BUSY_RETRY_MS,
+                            wifiEnablePending ? WIFI_MODE_TIMEOUT_MS : WIFI_STATUS_RECOVERY_MS);
+                    } else {
+                        stopWifiStatusRefresh();
+                        clearWifiScanWatchdog();
+                        const initialDelay = wifiScanSessionNeedsImmediateScan ? 0 : undefined;
+                        wifiScanSessionNeedsImmediateScan = false;
+                        startWifiAutoScan(initialDelay);
+                    }
                 }
             } else {
                 wifiSwitchInput.checked = false;
                 wifiNetworksContainer.style.display = 'none';
+                stopWifiStatusRefresh();
+                pauseWifiAutoScan();
             }
             console.log('[WiFi] 状态初始化完成:', wifiStatus);
 
@@ -8023,8 +8055,9 @@ function initWifiStatus() {
             updateWifiStatusBar();
             renderWifiList();
         } else {
-            // 串口未就绪/设备未响应时保持 UI 不变，等待后续 serial:opened / system:status 再刷新
+            // 保持 UI，在当前页面内短查询重试；断链后的恢复由连接事件触发。
             console.warn('[WiFi] 状态初始化失败:', response);
+            scheduleWifiStatusRefresh(WIFI_SCAN_BUSY_RETRY_MS);
         }
     });
 }
@@ -8040,6 +8073,11 @@ function toggleWifiSwitch() {
 }
 // 处理WiFi开关状态变化
 function handleWifiSwitchChange(isOn) {
+    const previousStatus = { ...wifiStatus };
+    const generation = ++wifiSwitchGeneration;
+    wifiDesiredOn = isOn;
+    wifiEnablePending = isOn;
+    stopWifiAutoScan();
     const wifiNetworksContainer = document.getElementById('wifiNetworksContainer');
     if (isOn) {
         if (isWifiSettingsActive() && !wifiScanSessionDeadline) {
@@ -8055,25 +8093,20 @@ function handleWifiSwitchChange(isOn) {
         wifiNetworksContainer.style.display = 'block';
         updateWifiStatusBar();
         renderWifiList();
-        scheduleWifiStatusRefresh(0, 20000);
-        sendMessage('wifi', 'getStatus', {}, (statusResponse) => {
-            if (statusResponse.code === 0 && statusResponse.data) {
-                const currentMode = statusResponse.data.mode || 0;
-                const storedCount = statusResponse.data.storedCount || 0;
-                if (currentMode === 1 || currentMode === 3) {
-                    initWifiStatus();
-                    return;
-                }
-                if (storedCount > 0) {
-                    wifiStatus.connecting = true;
-                    updateWifiStatusBar();
-                }
-            }
-            switchToStaModeAuto();
-        });
+        // setMode(1) 已表示开启并尝试保存网络；不得再用 getStatus 阻塞开启，
+        // 也不能把旧 OFF 快照当成新的用户意图。
+        switchToStaModeAuto(generation);
+        scheduleWifiStatusRefresh(0, WIFI_MODE_TIMEOUT_MS);
     } else {
+        clearWifiConnectionOperation();
+        wifiStatus.on = false;
+        wifiStatus.enabled = false;
+        wifiStatus.connecting = false;
+        wifiStatus.scanning = false;
+        wifiNetworksContainer.style.display = 'none';
         // 关闭WiFi
-        sendMessage('wifi', 'setMode', { mode: 0 }, (response) => {
+        sendMessageWithTimeout('wifi', 'setMode', { mode: 0 }, WIFI_MODE_TIMEOUT_MS, (response) => {
+            if (generation !== wifiSwitchGeneration) return;
             if (response.code === 0) {
                 wifiStatus.mode = 0;
                 wifiStatus.on = false;
@@ -8092,9 +8125,18 @@ function handleWifiSwitchChange(isOn) {
                 renderWifiList();
                 showToast('WiFi 已关闭');
             } else {
-                // 失败则恢复开关状态
-                document.getElementById('wifiSwitchInput').checked = true;
-                showToast(`WiFi 关闭失败: ${formatDeviceCommandError(response)}`);
+                wifiDesiredOn = null;
+                // 关闭未确认时恢复最后已知快照及整套 UI，不能只恢复勾选。
+                // 超时不代表关闭成功；保留已知状态，交给短查询确认。
+                wifiStatus = previousStatus;
+                const enabled = isWifiIntentOn();
+                document.getElementById('wifiSwitchInput').checked = enabled;
+                wifiNetworksContainer.style.display = enabled ? 'block' : 'none';
+                updateWifiStatusBar();
+                renderWifiList();
+                const outcome = isDeviceTransportError(response) ? '关闭状态待确认' : '关闭失败';
+                showToast(`WiFi ${outcome}: ${formatDeviceCommandError(response)}`);
+                initWifiStatus();
             }
         });
     }
@@ -8160,14 +8202,8 @@ function beginWifiScanSession() {
     wifiScanSessionExpired = false;
     wifiScanSessionNeedsImmediateScan = true;
     wifiScanSessionStopTimer = setTimeout(() => {
-        pauseWifiAutoScan();
-        if (wifiBusyRecoveryTimer) {
-            clearTimeout(wifiBusyRecoveryTimer);
-            wifiBusyRecoveryTimer = null;
-        }
-        wifiScanSessionDeadline = 0;
+        stopWifiAutoScan(true);
         wifiScanSessionExpired = true;
-        wifiScanSessionStopTimer = null;
     }, WIFI_SCAN_SESSION_MAX_MS);
 }
 
@@ -8177,7 +8213,7 @@ function startWifiAutoScan(delayMs = undefined) {
         pauseWifiAutoScan();
         return;
     }
-    pauseWifiAutoScan();
+    if (wifiAutoScanTimer) return;
     const interval = delayMs ?? (wifiStatus.connected
         ? WIFI_SCAN_CONNECTED_INTERVAL_MS
         : WIFI_SCAN_DISCONNECTED_INTERVAL_MS);
@@ -8186,23 +8222,35 @@ function startWifiAutoScan(delayMs = undefined) {
         wifiAutoScanTimer = null;
         if (!isWifiSettingsActive() || !isWifiIntentOn() ||
             Date.now() >= wifiScanSessionDeadline) return;
-        if (wifiStatus.connecting || wifiStatus.scanning || wifiConnectOperation) {
-            startWifiAutoScan(WIFI_SCAN_BUSY_RETRY_MS);
+        if (wifiStatus.connecting || wifiStatus.scanning || wifiConnectOperation || wifiScanRequest) {
+            scheduleWifiStatusRefresh(WIFI_SCAN_BUSY_RETRY_MS);
             return;
         }
         scanWifiSilent();
     }, Math.max(0, Math.min(interval, remaining)));
 }
 // 停止WiFi自动扫描
-function stopWifiAutoScan() {
+function stopWifiAutoScan(preserveConnectionRecovery = false) {
+    ++wifiStatusGeneration;
+    wifiStatusRequest = null;
+    wifiScanRequest = null;
+    stopWifiStatusRefresh();
     pauseWifiAutoScan();
     if (wifiScanSessionStopTimer) {
         clearTimeout(wifiScanSessionStopTimer);
         wifiScanSessionStopTimer = null;
     }
-    if (wifiBusyRecoveryTimer) {
-        clearTimeout(wifiBusyRecoveryTimer);
-        wifiBusyRecoveryTimer = null;
+    // 扫描到期只结束发现；连接恢复由事务自己的期限负责。
+    // 真正离页/关闭仍使连接恢复回调失效，不能只清定时器留下在途查询。
+    if (!preserveConnectionRecovery) {
+        if (wifiConnectOperation) {
+            ++wifiConnectOperation.recoveryGeneration;
+            wifiConnectOperation.recoveryRequest = null;
+        }
+        if (wifiBusyRecoveryTimer) {
+            clearTimeout(wifiBusyRecoveryTimer);
+            wifiBusyRecoveryTimer = null;
+        }
     }
     wifiScanSessionDeadline = 0;
     wifiScanSessionExpired = false;
@@ -8219,21 +8267,9 @@ function armWifiScanWatchdog() {
     clearWifiScanWatchdog();
     wifiScanWatchdogTimer = setTimeout(() => {
         wifiScanWatchdogTimer = null;
-        if (!wifiStatus.scanning || !isWifiSettingsActive()) return;
-        sendMessage('wifi', 'getStatus', {}, (response) => {
-            if (!wifiStatus.scanning) return;
-            if (response.code === 0 && response.data) {
-                applyWifiStatusSnapshot(response.data);
-                updateWifiStatusBar();
-                if (!response.data.scanning) {
-                    wifiStatus.scanning = false;
-                    startWifiAutoScan();
-                    return;
-                }
-            }
-            wifiStatus.scanning = false;
-            startWifiAutoScan(WIFI_SCAN_BUSY_RETRY_MS);
-        });
+        // 轮询可能已清除 scanning，仍须查询 owner 快照收尾；
+        // 禁止依赖这个本地标志放弃恢复，或自行假造设备已空闲。
+        scheduleWifiStatusRefresh(0);
     }, WIFI_SCAN_COMPLETE_WATCHDOG_MS);
 }
 function stopWifiDeviceScan() {
@@ -8243,40 +8279,48 @@ function stopWifiDeviceScan() {
 }
 
 function recoverWifiScanBusy() {
+    const operation = wifiConnectOperation;
+    if (!operation || operation.started || !isWifiSettingsActive() ||
+        Date.now() >= operation.deadline) return;
+    if (wifiBusyRecoveryTimer || operation.recoveryRequest) return;
+    const generation = operation.recoveryGeneration;
     pauseWifiAutoScan();
-    if (wifiBusyRecoveryTimer) clearTimeout(wifiBusyRecoveryTimer);
     wifiBusyRecoveryTimer = setTimeout(() => {
         wifiBusyRecoveryTimer = null;
-        if (!isWifiSettingsActive()) return;
-        if (wifiConnectOperation) {
-            sendMessage('wifi', 'getStatus', {}, (response) => {
-                if (response.code !== 0 || !response.data) return;
-                const data = response.data;
-                wifiStatus.connected = !!data.connected;
-                wifiStatus.connecting = !!data.connecting;
-                wifiStatus.scanning = !!data.scanning;
-                if (wifiStatus.connected && data.ssid === wifiConnectOperation.ssid) {
-                    wifiStatus.ssid = data.ssid;
-                    finishWifiConnection(data.ssid);
-                    startWifiAutoScan();
-                } else if (!wifiStatus.connecting && !wifiStatus.scanning) {
-                    startPendingWifiConnection();
-                } else {
-                    recoverWifiScanBusy();
-                }
-            });
-            return;
-        }
-        initWifiStatus();
+        if (!isWifiSettingsActive() || wifiConnectOperation !== operation ||
+            generation !== operation.recoveryGeneration || Date.now() >= operation.deadline) return;
+        operation.recoveryRequest = true;
+        sendMessageWithTimeout('wifi', 'getStatus', {}, WIFI_STATUS_TIMEOUT_MS, (response) => {
+            if (wifiConnectOperation !== operation || generation !== operation.recoveryGeneration ||
+                !isWifiSettingsActive() || Date.now() >= operation.deadline) return;
+            operation.recoveryRequest = null;
+            if (response.code !== 0 || !response.data) {
+                recoverWifiScanBusy();
+                return;
+            }
+            const data = response.data;
+            applyWifiStatusSnapshot(data);
+            wifiStatus.connecting = !!data.connecting || wifiStatus.waitingForIp;
+            wifiStatus.scanning = !!data.scanning;
+            if (wifiStatus.connected && data.ssid === operation.ssid) {
+                wifiStatus.ssid = data.ssid;
+                finishWifiConnection(data.ssid);
+                startWifiAutoScan();
+            } else if (!wifiStatus.connecting && !wifiStatus.waitingForIp && !wifiStatus.scanning) {
+                startPendingWifiConnection();
+            } else {
+                recoverWifiScanBusy();
+            }
+        });
     }, WIFI_SCAN_BUSY_RETRY_MS);
 }
 
 // 静默扫描WiFi（不显示加载状态）
 function scanWifiSilent() {
-    if (!isWifiIntentOn() || wifiStatus.connecting || wifiStatus.scanning) {
+    if (!isWifiIntentOn() || wifiStatus.connecting || wifiStatus.scanning || wifiScanRequest) {
         return;
     }
-    if (!isWifiSettingsActive()) {
+    if (!isWifiSettingsActive() || Date.now() >= wifiScanSessionDeadline) {
         return;
     }
     if (wifiNetworks.length === 0) {
@@ -8287,7 +8331,11 @@ function scanWifiSilent() {
     }
     wifiActiveScanNetworks = new Set();
     wifiStatus.scanning = true;
-    sendMessage('wifi', 'startScan', { duration: WIFI_SCAN_REQUEST_DURATION_S }, (response) => {
+    const request = { generation: wifiStatusGeneration };
+    wifiScanRequest = request;
+    sendMessageWithTimeout('wifi', 'startScan', { duration: WIFI_SCAN_REQUEST_DURATION_S }, WIFI_STATUS_TIMEOUT_MS, (response) => {
+        if (wifiScanRequest !== request || request.generation !== wifiStatusGeneration) return;
+        wifiScanRequest = null;
         if (response.code !== 0) {
             console.warn('[WiFi] 扫描失败:', response.msg);
             wifiStatus.scanning = false;
@@ -8298,15 +8346,14 @@ function scanWifiSilent() {
                 return;
             }
             if (response.code === 6) {
-                recoverWifiScanBusy();
+                scheduleWifiStatusRefresh(WIFI_SCAN_BUSY_RETRY_MS);
                 return;
             }
             renderDeviceListState(
                 document.getElementById('wifiList'),
                 `WiFi 扫描失败：${formatDeviceCommandError(response, '请重试')}`
             );
-            startPendingWifiConnection();
-            startWifiAutoScan();
+            scheduleWifiStatusRefresh(WIFI_SCAN_BUSY_RETRY_MS);
             return;
         }
         armWifiScanWatchdog();
@@ -8453,8 +8500,9 @@ function renderWifiList() {
             itemMap.set(key, item);
         }
         const isConnected = wifiStatus.connected && wifiStatus.ssid === network.ssid;
-        const isConnecting = !!wifiConnectOperation && wifiConnectOperation.ssid === network.ssid;
-        const isWaitingForScan = isConnecting && wifiConnectOperation.phase === 'waitingScan';
+        const isConnecting = (wifiConnectOperation?.ssid === network.ssid) ||
+            (wifiStatus.connecting && wifiStatus.ssid === network.ssid);
+        const isWaitingForScan = isConnecting && wifiConnectOperation?.phase === 'waitingScan';
         const isSaved = wifiSavedSsids.has(network.ssid);
         const connectionFailure = wifiConnectionFailure?.ssid === network.ssid
             ? wifiConnectionFailure.reason
@@ -8467,6 +8515,8 @@ function renderWifiList() {
             isWaitingForScan,
             isSaved,
             connectionFailure,
+            connectionStatus: wifiStatus.waitingForIp && wifiStatus.ssid === network.ssid
+                ? '等待获取 IP 地址' : null,
             connectDisabled: !!wifiConnectOperation,
             getSecurityIcon,
             onDetails: () => window.showWifiDetails(network.ssid),
@@ -8482,47 +8532,34 @@ function renderWifiList() {
 }
 
 // 尝试 STA 自动连接（不带 SSID）
-function switchToStaModeAuto() {
+function switchToStaModeAuto(generation = wifiSwitchGeneration) {
     console.log('[WiFi] 尝试 STA 自动连接...');
     showToast('正在开启 WiFi...');
-    setTimeout(() => {
-        initWifiStatus();
-    }, 1500);
-    sendMessage('wifi', 'setMode', { mode: 1 }, (response) => {
+    // 固件保留最长 32 秒的操作终结响应；不能套用状态查询/扫描接受的
+    // 短超时，也不能因响应未到就重发 setMode。
+    sendMessageWithTimeout('wifi', 'setMode', { mode: 1 }, WIFI_MODE_TIMEOUT_MS, (response) => {
+        if (generation !== wifiSwitchGeneration || wifiDesiredOn !== true) return;
+        wifiEnablePending = false;
+        ++wifiStatusGeneration;
+        wifiStatusRequest = null;
+        wifiScanRequest = null;
         if (response.code === 0) {
             wifiStatus.mode = 1;
+            stopWifiStatusRefresh();
             initWifiStatus();
             showToast('WiFi 已开启（自动连接）');
-            return;
-        }
-        if (isDeviceTransportError(response)) {
-            console.warn('[WiFi] STA 自动连接请求失败:', response);
-            sendMessage('wifi', 'getStatus', {}, (statusResponse) => {
-                if (statusResponse.code === 0 && statusResponse.data) {
-                    const wifiEnabled = !!(statusResponse.data.enabled || statusResponse.data.on);
-                    if (wifiEnabled) {
-                        applyWifiStatusSnapshot(statusResponse.data);
-                        document.getElementById('wifiSwitchInput').checked = true;
-                        initWifiStatus();
-                        showToast('WiFi 已开启');
-                        return;
-                    }
-                }
-                document.getElementById('wifiSwitchInput').checked = false;
-                wifiStatus.on = false;
-                wifiStatus.enabled = false;
-                wifiStatus.connecting = false;
-                updateWifiStatusBar();
-                showToast(`WiFi 开启失败: ${formatDeviceCommandError(response)}`);
-            });
             return;
         }
         if (isWifiOwnerFault(response)) {
             showWifiOwnerFault(response);
             return;
         }
-        console.log('[WiFi] STA 无保存网络或未连接，改为扫描:', response);
-        beginWifiScanAfterEnable();
+        // 无保存网络（code 4）仍可能已开启；busy/超时也不能证明已开启。
+        // 只按新快照恢复，禁止伪造开启成功。
+        if (response.code !== 4) {
+            showToast(`WiFi 开启状态待确认: ${formatDeviceCommandError(response)}`);
+        }
+        stopWifiStatusRefresh();
         initWifiStatus();
     });
 }
@@ -8550,12 +8587,7 @@ window.deleteWifiNetwork = (ssid) => {
                 // 刷新状态/列表
                 sendMessage('wifi', 'getStatus', {}, (statusResponse) => {
                     if (statusResponse.code === 0 && statusResponse.data) {
-                        wifiStatus.connected = statusResponse.data.connected || false;
-                        wifiStatus.connecting = !!statusResponse.data.connecting || !!wifiConnectOperation;
-                        syncWifiSavedSsids(statusResponse.data);
-                        wifiStatus.ssid = statusResponse.data.ssid || null;
-                        wifiStatus.ip = statusResponse.data.ip || null;
-                        wifiStatus.rssi = normalizeWifiRssi(statusResponse.data.rssi);
+                        applyWifiStatusSnapshot(statusResponse.data);
                         updateWifiStatusBar();
                     }
                     // 重新扫描以刷新列表
@@ -8584,6 +8616,10 @@ function escapeHtml(text) {
 }
 
 function clearWifiConnectionOperation() {
+    if (wifiBusyRecoveryTimer) {
+        clearTimeout(wifiBusyRecoveryTimer);
+        wifiBusyRecoveryTimer = null;
+    }
     if (wifiConnectOperation?.timer) {
         clearTimeout(wifiConnectOperation.timer);
     }
@@ -8609,6 +8645,7 @@ function finishWifiConnection(ssid) {
 function failWifiConnection(ssid = null, resumeDiscovery = true) {
     if (wifiConnectOperation && ssid && wifiConnectOperation.ssid !== ssid) return;
     clearWifiConnectionOperation();
+    wifiStatus.waitingForIp = false;
     wifiStatus.connecting = false;
     updateWifiStatusBar();
     renderWifiList();
@@ -8618,6 +8655,11 @@ function failWifiConnection(ssid = null, resumeDiscovery = true) {
 }
 
 function resetWifiConnectionAfterTransportLoss() {
+    wifiStatus.waitingForIp = false;
+    wifiConnectionFailure = null;
+    ++wifiSwitchGeneration;
+    wifiDesiredOn = null;
+    wifiEnablePending = false;
     clearWifiConnectionOperation();
     wifiStatus.connecting = false;
     wifiStatus.scanning = false;
@@ -8640,25 +8682,29 @@ function startPendingWifiConnection() {
     operation.timer = setTimeout(() => {
         if (wifiConnectOperation?.id !== operation.id) return;
         console.warn('[WiFi] 连接及 DHCP 等待超时:', operation.ssid);
-        wifiConnectionFailure = { ssid: operation.ssid, reason: '连接超时' };
+        wifiConnectionFailure = { ssid: operation.ssid,
+            reason: wifiStatus.waitingForIp ? '获取 IP 地址超时' : '连接超时' };
+        wifiStatus.waitingForIp = false;
         failWifiConnection(operation.ssid, false);
-        showToast(`连接 ${operation.ssid} 超时`);
+        showToast(`${operation.ssid}：${wifiConnectionFailure.reason}`);
         initWifiStatus();
-    }, WIFI_CONNECT_TIMEOUT_MS);
+    }, Math.max(0, operation.deadline - Date.now()));
     sendMessage('wifi', 'connect', {
         ssid: operation.ssid,
         password: operation.password || '',
         useSaved: operation.useSaved,
         save: true
     }, (response) => {
-        operation.password = '';
         if (wifiConnectOperation?.id !== operation.id) return;
         if (response.code === 0) {
+            operation.password = '';
             wifiStatus.mode = 1;
             console.log('[WiFi] 连接请求已接受:', operation.ssid);
             return;
         }
         if (response.code === 6) {
+            // 凭据由当前 WiFi 事务持有至接受或终结；禁止在 busy 时清空，
+            // 否则重试会变成空密码连接。
             operation.started = false;
             recoverWifiScanBusy();
             return;
@@ -8682,6 +8728,7 @@ function queueWifiConnection(ssid, password, useSaved = false) {
 
     pauseWifiAutoScan();
     wifiConnectionFailure = null;
+    wifiStatus.waitingForIp = false;
     wifiStatus.connecting = true;
     wifiStatus.scanning = false;
     clearWifiScanWatchdog();
@@ -8692,6 +8739,9 @@ function queueWifiConnection(ssid, password, useSaved = false) {
         useSaved,
         phase: 'connecting',
         started: false,
+        deadline: Date.now() + WIFI_CONNECT_TIMEOUT_MS,
+        recoveryGeneration: 0,
+        recoveryRequest: null,
         timer: null
     };
     updateWifiStatusBar();

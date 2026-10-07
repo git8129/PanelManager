@@ -192,6 +192,7 @@ window.UIComponents = (() => {
             isWaitingForScan = false,
             isSaved = false,
             connectionFailure = null,
+            connectionStatus = null,
             connectDisabled = false,
             onDetails,
             onDisconnect,
@@ -219,7 +220,7 @@ window.UIComponents = (() => {
 
         refs.icon.textContent = getSecurityIcon(network.security);
         refs.name.textContent = `${safeText(network.ssid)}${isConnected ? ' ✓' : ''}`;
-        refs.meta.textContent = isConnected
+        refs.meta.textContent = connectionStatus || (isConnected
             ? '已连接'
             : isWaitingForScan
                 ? '等待扫描完成...'
@@ -229,7 +230,7 @@ window.UIComponents = (() => {
                     ? `连接失败：${safeText(connectionFailure)}`
                 : isSaved
                     ? (network.rssi === null || network.rssi === undefined ? '无信号' : '未连接')
-                    : network.security === 'open' ? '开放网络' : '需要密码';
+                    : network.security === 'open' ? '开放网络' : '需要密码');
 
         if (!refs.signal) {
             refs.signal = createWifiSignalIndicator(network.rssi);
