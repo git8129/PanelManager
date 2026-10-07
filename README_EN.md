@@ -25,6 +25,8 @@ hardware implementation.
 - Utility and configuration pages for EDID, shortcuts, notes, and related tools
 - AI assistant with model selection, conversations, step and tool details, and provider configuration
 - Windows floating-window integration through the `FloatingWindow` project
+- Performance monitoring with selectable CPU/GPU temperature sensors
+- Startup checks for GitHub releases, with user-confirmed download and installer handoff
 
 ## Host And Device Boundary
 
@@ -44,8 +46,8 @@ hardware implementation.
 - `PanelManager/Dependencies/Isd/IsdDownload.dll`: precompiled x64 native PMFW verification and download boundary, SHA-256 `2E8748ED54EA93C0D8D433E7B6A877CED01569BA24404ADC5B7B6BEA2EDB5800`
 - `FloatingWindow/`: Windows floating-window companion application using WPF
 - `Installer/`: Windows installer project
-- `skills/panelmanager-opencode/SKILL.md`: local OpenCode project skill
-- `AGENTS.md`: repository-wide instructions for coding agents
+- `skills/panelmanager-opencode/SKILL.md`: on-demand OpenCode build and delivery entry point
+- `AGENTS.md`: shared development instructions for the repository and source workspaces
 - `scripts/build-windows-cli.ps1`: minimal Windows CLI build script
 - `scripts/publish-windows-cli.ps1`: Windows folder publishing script
 - `scripts/package-windows-installer.ps1`: Windows installer packaging script

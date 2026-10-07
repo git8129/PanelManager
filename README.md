@@ -19,6 +19,8 @@ PanelManager 是一个基于 .NET MAUI + BlazorWebView 的桌面副屏控制面�
 - 工具页与配置页（包含 EDID、快捷控制、便签等界面能力）
 - AI 助手页（模型选择、会话、步骤/工具详情、Provider 配置）
 - Windows 悬浮窗协同（`FloatingWindow` 子工程）
+- CPU/GPU 温度来源选择与性能监控
+- 启动检查 GitHub 新版本，确认后下载并交由安装器更新
 
 ## 上下位机边界
 
@@ -37,8 +39,8 @@ PanelManager 是一个基于 .NET MAUI + BlazorWebView 的桌面副屏控制面�
 - `PanelManager/`：主应用（MAUI + BlazorWebView）
 - `PanelManager/Dependencies/Isd/IsdDownload.dll`：预编译 x64 原生 PMFW 验签与下载边界，SHA-256 为 `2E8748ED54EA93C0D8D433E7B6A877CED01569BA24404ADC5B7B6BEA2EDB5800`
 - `FloatingWindow/`：Windows 悬浮窗子项目（WPF）
-- `skills/panelmanager-opencode/SKILL.md`：OpenCode 本地工程技能（主规则入口）
-- `AGENTS.md`：仓库智能体手册，也是源码包工作区的通用规则入口
+- `skills/panelmanager-opencode/SKILL.md`：OpenCode 构建与交付入口，按需使用
+- `AGENTS.md`：仓库及源码包工作区的统一开发规则入口
 - `scripts/build-windows-cli.ps1`：最小化 Windows CLI 编译脚本
 - `scripts/publish-windows-cli.ps1`：最小化 Windows CLI 发布脚本
 
