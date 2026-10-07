@@ -23,7 +23,15 @@
 
   <ItemGroup>
     <RuntimeHostConfigurationOption Include="System.Runtime.InteropServices.EnableConsumingManagedCodeFromNativeHosting" Value="true" />
+    <EmbeddedResource Include="Dependencies\PawnIO\PawnIO_setup.exe" LogicalName="PawnIO_setup.exe" />
   </ItemGroup>
+
+  <Target Name="VerifyPawnIoResource" BeforeTargets="BeforeBuild">
+    <GetFileHash Files="$(MSBuildThisFileDirectory)Dependencies\PawnIO\PawnIO_setup.exe" Algorithm="SHA256">
+      <Output TaskParameter="Hash" PropertyName="PawnIoResourceHash" />
+    </GetFileHash>
+    <Error Condition="'$(PawnIoResourceHash)' != 'A3A46226C5E2824F4CDD42BE0EECBABFC672C86F7889710F5AB1E6AD385B47A0'" Text="PawnIO resource does not match LibreHardwareMonitor v0.9.6." />
+  </Target>
 
   <ItemGroup Condition="'$(PayloadZip)' != '' And Exists('$(PayloadZip)')">
     <EmbeddedResource Include="$(PayloadZip)" LogicalName="payload.7z" />

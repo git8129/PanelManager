@@ -165,6 +165,12 @@ namespace PanelManager.WinUI
         {
             try
             {
+                // 在获取单实例互斥量之前交接，避免提权子进程被父进程误判为重复启动。
+                if (PanelManager.Services.StartupPrivileges.TryStartElevated())
+                {
+                    Environment.Exit(0);
+                    return;
+                }
                 EnsureSingleInstanceOrExit();
 
 #if DEBUG

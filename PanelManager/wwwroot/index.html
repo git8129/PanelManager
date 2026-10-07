@@ -190,7 +190,7 @@
                                     </div>
                                     <div class="perf-item-large perf-item-large--temperature">
                                         <div class="perf-info">
-                                            <span class="perf-label">🌡️ 温度</span>
+                                            <span class="perf-label" id="miniTemperatureLabel">🌡️ CPU</span>
                                             <span class="perf-value" id="miniTempValue">N/A</span>
                                         </div>
                                         <div class="mini-chart" id="miniTempChart" role="progressbar"
@@ -1065,10 +1065,17 @@
                             <span class="monitor-icon">🌡️</span>
                             <div class="monitor-heading">
                                 <span class="monitor-title">温度</span>
-                                <span class="monitor-meta">最近 60 秒 · CPU 温度</span>
+                                <span class="monitor-meta" id="temperatureSourceLabel">最近 60 秒 · 自动（CPU）</span>
                             </div>
                             <span class="monitor-value" id="tempValue">N/A</span>
                         </div>
+                        <label class="ui-field temperature-source-field" for="temperatureSourceSelect">
+                            <span class="ui-field-label">显示温度</span>
+                            <select id="temperatureSourceSelect" class="ui-select" onchange="changeTemperatureSource(this.value)" aria-describedby="temperatureHint">
+                                <option value="">自动（CPU）</option>
+                            </select>
+                        </label>
+                        <p id="temperatureHint" class="ui-field-hint" hidden></p>
                         <canvas id="tempChart" class="chart-canvas" aria-label="CPU 最近 60 秒温度图表"></canvas>
                     </div>
                     <div class="monitor-card monitor-card--network">

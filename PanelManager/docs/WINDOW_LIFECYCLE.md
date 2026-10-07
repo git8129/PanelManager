@@ -2,6 +2,8 @@
 
 ## Duplicate Launch
 
+启动时先请求提权，拒绝后进入兼容模式；权限交接发生在单实例检查前。
+
 PanelManager uses two session-local named objects:
 
 - `PanelManager.SingleInstance` elects the primary host process.

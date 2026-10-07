@@ -5497,6 +5497,40 @@ body {
     --monitor-accent: var(--ui-color-warning, #ff9f0a);
 }
 
+.monitor-card .temperature-source-field {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: var(--ui-space-3);
+    flex-shrink: 0;
+    min-width: 0;
+}
+
+.temperature-source-field .ui-field-label {
+    flex-shrink: 0;
+}
+
+.temperature-source-field .ui-select {
+    flex: 1;
+    min-width: 0;
+    width: 0;
+}
+
+#temperatureSourceLabel {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#temperatureHint {
+    margin: 0;
+    flex-shrink: 0;
+}
+
+.monitor-card--temperature .chart-canvas {
+    min-height: 80px;
+}
+
 .monitor-card--network {
     --monitor-accent: #64d2ff;
 }

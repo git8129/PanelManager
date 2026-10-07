@@ -52,6 +52,7 @@ internal sealed class InstallerText
     public string StoppingApplication { get; init; } = "";
     public string RunningAppPrompt { get; init; } = "";
     public string ExtractingFiles { get; init; } = "";
+    public string InstallingTemperatureDriver { get; init; } = "";
     public string CreatingShortcuts { get; init; } = "";
     public string RegisteringUninstallEntry { get; init; } = "";
     public string RemovingShortcuts { get; init; } = "";
@@ -87,6 +88,7 @@ internal sealed class InstallerText
         StoppingApplication = "正在停止运行中的程序...",
         RunningAppPrompt = "检测到 PanelManager 正在运行。是否强制关闭后继续？",
         ExtractingFiles = "正在解压文件...",
+        InstallingTemperatureDriver = "正在安装温度监控驱动...",
         CreatingShortcuts = "正在创建快捷方式...",
         RegisteringUninstallEntry = "正在注册卸载入口...",
         RemovingShortcuts = "正在移除快捷方式...",
@@ -117,6 +119,7 @@ internal sealed class InstallerText
         StoppingApplication = "Stopping running application...",
         RunningAppPrompt = "PanelManager is running. Force close it and continue?",
         ExtractingFiles = "Extracting files...",
+        InstallingTemperatureDriver = "Installing temperature monitoring driver...",
         CreatingShortcuts = "Creating shortcuts...",
         RegisteringUninstallEntry = "Registering uninstall entry...",
         RemovingShortcuts = "Removing shortcuts...",
@@ -585,6 +588,10 @@ internal static class Program
 
     private static void DoInstall(string installDir, InstallerState state)
     {
+        // 先完成依赖安装；UAC 被拒绝或驱动失败时不替换原应用。
+        PostProgress(state, 5, state.Text.InstallingTemperatureDriver);
+        PawnIoDriverInstaller.Install();
+
         PostProgress(state, 10, state.Text.StoppingApplication);
         StopAppProcesses();
 

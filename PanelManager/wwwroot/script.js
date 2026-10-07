@@ -1637,8 +1637,114 @@ function subscribePerformanceMonitoring() {
         }
     });
 }
+// 温度选择只影响当前界面展示；按 LHM 稳定 ID 保存，不把同名 CPU/GPU 传感器混为一项。
+const TEMPERATURE_SOURCE_STORAGE_KEY = 'temperatureSource';
+let selectedTemperatureSource = loadTemperatureSource();
+let latestPerformanceStats = null;
+
+function loadTemperatureSource() {
+    try {
+        const saved = JSON.parse(localStorage.getItem(TEMPERATURE_SOURCE_STORAGE_KEY) || 'null');
+        if (saved && typeof saved.id === 'string' && typeof saved.label === 'string') return saved;
+    } catch { /* 存储不可用时仍允许本次会话选择。 */ }
+    return { id: '', label: '自动（CPU）' };
+}
+
+function getTemperatureSensors(data) {
+    const sensors = Array.isArray(data?.temperatureSensors) ? data.temperatureSensors : [];
+    return Array.from(new Map(sensors.slice(0, 256)
+        .filter(sensor => sensor && typeof sensor.id === 'string' && sensor.id && typeof sensor.name === 'string')
+        .map(sensor => [sensor.id, sensor])).values());
+}
+
+function temperatureSensorLabel(sensor) {
+    return [sensor.kind, sensor.hardware, sensor.name].filter(Boolean).join(' · ');
+}
+
+function syncTemperatureSourceSelect(sensors) {
+    const select = document.getElementById('temperatureSourceSelect');
+    if (!select) return;
+    const choices = [{ id: '', label: '自动（CPU）' }, ...sensors.map(sensor => ({
+        id: sensor.id, label: temperatureSensorLabel(sensor)
+    }))];
+    if (selectedTemperatureSource.id && !sensors.some(sensor => sensor.id === selectedTemperatureSource.id)) {
+        choices.push({ id: selectedTemperatureSource.id, label: `${selectedTemperatureSource.label}（暂不可用）` });
+    }
+    // 数值每两秒刷新，只有身份/名称变化才重建选项，避免打断用户展开的下拉框。
+    const key = JSON.stringify(choices);
+    if (select.dataset.sources !== key) {
+        const options = choices.map(choice => {
+            const option = document.createElement('option');
+            option.value = choice.id;
+            option.textContent = choice.label;
+            return option;
+        });
+        select.replaceChildren(...options);
+        select.dataset.sources = key;
+    }
+    select.value = selectedTemperatureSource.id;
+}
+
+function resolveTemperatureDisplay(data, sensors) {
+    const selected = sensors.find(sensor => sensor.id === selectedTemperatureSource.id);
+    if (!selectedTemperatureSource.id) {
+        return { ...data, temperatureLabel: '自动（CPU）', temperatureKind: 'CPU' };
+    }
+    const value = selected?.value;
+    const valid = typeof value === 'number' && Number.isFinite(value) && value > 0 && value < 150;
+    // 指定来源丢失/无权限时显示 N/A，禁止偷偷回退 CPU 或沿用其他传感器的旧读数。
+    return {
+        ...data,
+        temperature: valid ? value : 0,
+        temperatureLabel: selected ? temperatureSensorLabel(selected) : selectedTemperatureSource.label,
+        temperatureKind: selected?.kind || '',
+        temperatureHint: valid ? '' : (selected
+            ? '所选传感器暂未提供有效温度，请检查采集权限、驱动或选择其他来源。'
+            : '所选温度传感器暂不可用，请等待恢复或选择其他来源。')
+    };
+}
+
+function changeTemperatureSource(id) {
+    if (id === selectedTemperatureSource.id) return;
+    const sensor = getTemperatureSensors(latestPerformanceStats).find(sensor => sensor.id === id);
+    if (id && !sensor) return;
+    selectedTemperatureSource = { id, label: sensor ? temperatureSensorLabel(sensor) : '自动（CPU）' };
+    try { localStorage.setItem(TEMPERATURE_SOURCE_STORAGE_KEY, JSON.stringify(selectedTemperatureSource)); }
+    catch { /* 不影响当前会话。 */ }
+    // 历史曲线的 owner 是来源选择；切换后清空，不能将 CPU 与 GPU 数据连成同一条曲线。
+    monitorData.temperature.length = 0;
+    delete chartAnimations.tempChart;
+    if (latestPerformanceStats) updatePerformanceDisplay(latestPerformanceStats);
+    else syncTemperatureSourceSelect([]);
+}
+
 // 更新性能显示
 function updatePerformanceDisplay(data) {
+    latestPerformanceStats = data;
+    const sensors = getTemperatureSensors(data);
+    syncTemperatureSourceSelect(sensors);
+    data = resolveTemperatureDisplay(data, sensors);
+    const sourceLabel = document.getElementById('temperatureSourceLabel');
+    if (sourceLabel) {
+        sourceLabel.textContent = `最近 60 秒 · ${data.temperatureLabel}`;
+        sourceLabel.title = data.temperatureLabel;
+    }
+    const miniLabel = document.getElementById('miniTemperatureLabel');
+    if (miniLabel) {
+        miniLabel.textContent = `🌡️ ${data.temperatureKind || '温度'}`;
+        miniLabel.title = data.temperatureLabel;
+    }
+    for (const id of ['tempChart', 'miniTempChart']) {
+        document.getElementById(id)?.setAttribute('aria-label', `${data.temperatureLabel} 温度`);
+    }
+    const temperatureHint = data.temperature > 0 ? '' : (data.temperatureHint || '暂未读取到有效 CPU 温度');
+    const hint = document.getElementById('temperatureHint');
+    if (hint) {
+        hint.textContent = temperatureHint;
+        hint.hidden = !temperatureHint;
+    }
+    const miniTemperature = document.getElementById('miniTempValue');
+    if (miniTemperature) miniTemperature.title = temperatureHint;
     // 更新首页小组件
     const miniCpuValue = document.getElementById('miniCpuValue');
     const miniMemValue = document.getElementById('miniMemValue');
@@ -7057,6 +7163,8 @@ function initMonitoring() {
     if (intervalSelect) {
         intervalSelect.style.display = 'none';
     }
+    if (latestPerformanceStats) updatePerformanceDisplay(latestPerformanceStats);
+    else syncTemperatureSourceSelect([]);
     drawAllMonitorCharts();
     console.log('[Monitor] 性能监控详情页已初始化，数据来自订阅推送');
 }

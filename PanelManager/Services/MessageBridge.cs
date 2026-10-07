@@ -1,5 +1,4 @@
 ﻿using Fleck;
-using LibreHardwareMonitor.Hardware;
 using PanelManager.Models;
 using System;
 using System.Collections.Concurrent;
@@ -49,9 +48,7 @@ namespace PanelManager.Services
         private bool _performanceSubscribed = false;
         private System.Diagnostics.PerformanceCounter? _cpuCounter;
         private System.Diagnostics.PerformanceCounter? _ramCounter;
-        private Computer? _hardwareMonitor;
-        private bool _temperatureReadFailureLogged;
-        private bool _temperatureUnavailableLogged;
+        private readonly TemperatureMonitor _temperatureMonitor = new();
 
         // 自动重连控制
         private Timer? _autoReconnectTimer;
@@ -1002,21 +999,8 @@ namespace PanelManager.Services
                 // 第一次调用 CPU 计数器（需要预热）
                 _cpuCounter.NextValue();
 
-                try
-                {
-                    _hardwareMonitor = new Computer
-                    {
-                        IsCpuEnabled = true
-                    };
-                    _hardwareMonitor.Open();
-                    Log("[Performance] LibreHardwareMonitor CPU 温度采集已启用");
-                }
-                catch (Exception ex)
-                {
-                    _hardwareMonitor?.Close();
-                    _hardwareMonitor = null;
-                    Log($"[Performance] LibreHardwareMonitor 初始化失败，温度将显示为 N/A: {ex.Message}");
-                }
+                _temperatureMonitor.Start();
+                Log("[Performance] 温度采集 worker 已启动，等待 CPU/GPU 传感器快照");
 
                 // 初始化网络监控基准值
                 _lastTimestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -1029,6 +1013,7 @@ namespace PanelManager.Services
             catch (Exception ex)
             {
                 Log($"[Performance] 启动失败: {ex.Message}");
+                _temperatureMonitor.Stop();
                 _performanceSubscribed = false;
             }
         }
@@ -1047,10 +1032,7 @@ namespace PanelManager.Services
             _ramCounter?.Dispose();
             _ramCounter = null;
 
-            _hardwareMonitor?.Close();
-            _hardwareMonitor = null;
-            _temperatureReadFailureLogged = false;
-            _temperatureUnavailableLogged = false;
+            _temperatureMonitor.Stop();
 
             Log("[Performance] 性能监控已停止");
         }
@@ -1087,7 +1069,8 @@ namespace PanelManager.Services
                 }
                 catch { }
 
-                double temperature = ReadCpuTemperature();
+                var temperatureSnapshot = _temperatureMonitor.Read();
+                double temperature = temperatureSnapshot.CpuTemperature;
 
                 // 获取网络速度（合并到性能监控中）
                 long uploadSpeed = 0;
@@ -1125,6 +1108,15 @@ namespace PanelManager.Services
                         percent = memoryPercent
                     },
                     temperature = temperature,
+                    temperatureHint = temperature > 0 ? "" : GetTemperatureHint(),
+                    temperatureSensors = temperatureSnapshot.Sensors.Select(sensor => new
+                    {
+                        id = sensor.Id,
+                        hardware = sensor.Hardware,
+                        kind = sensor.Kind,
+                        name = sensor.Name,
+                        value = sensor.Value
+                    }),
                     network = new
                     {
                         upload = uploadSpeed,
@@ -1139,63 +1131,13 @@ namespace PanelManager.Services
             }
         }
 
-        private double ReadCpuTemperature()
+        private static string GetTemperatureHint()
         {
-            if (_hardwareMonitor == null)
-            {
-                return 0;
-            }
-
-            try
-            {
-                var candidates = new List<(string Name, double Value)>();
-                foreach (var hardware in _hardwareMonitor.Hardware.Where(item => item.HardwareType == HardwareType.Cpu))
-                {
-                    hardware.Update();
-                    foreach (var sensor in hardware.Sensors)
-                    {
-                        if (sensor.SensorType == SensorType.Temperature
-                            && sensor.Value is float value
-                            && value > 0
-                            && value < 150)
-                        {
-                            candidates.Add((sensor.Name, value));
-                        }
-                    }
-                }
-
-                if (candidates.Count == 0)
-                {
-                    if (!_temperatureUnavailableLogged)
-                    {
-                        _temperatureUnavailableLogged = true;
-                        Log("[Performance] LibreHardwareMonitor 未返回有效 CPU 温度；部分硬件需要管理员权限访问底层传感器");
-                    }
-                    return 0;
-                }
-
-                var preferredNames = new[] { "CPU Package", "Tctl/Tdie", "CPU (Tctl/Tdie)", "Core Max" };
-                foreach (var preferredName in preferredNames)
-                {
-                    var preferred = candidates.FirstOrDefault(candidate =>
-                        candidate.Name.Contains(preferredName, StringComparison.OrdinalIgnoreCase));
-                    if (preferred.Value > 0)
-                    {
-                        return Math.Round(preferred.Value, 1);
-                    }
-                }
-
-                return Math.Round(candidates.Max(candidate => candidate.Value), 1);
-            }
-            catch (Exception ex)
-            {
-                if (!_temperatureReadFailureLogged)
-                {
-                    _temperatureReadFailureLogged = true;
-                    Log($"[Performance] CPU 温度读取失败，温度将显示为 N/A: {ex.Message}");
-                }
-                return 0;
-            }
+            if (!StartupPrivileges.IsElevated)
+                return "兼容模式：未获得管理员权限，CPU 温度不可用；其他功能可继续使用。";
+            if (!LibreHardwareMonitor.PawnIo.PawnIo.IsInstalled)
+                return "温度监控驱动未安装，请重新运行 PanelManager 安装程序。";
+            return "暂未读取到有效 CPU 温度，传感器可能不受支持或驱动不可用。";
         }
 
         #endregion
@@ -1881,7 +1823,11 @@ namespace PanelManager.Services
             OnLog?.Invoke($"[{DateTime.Now:HH:mm:ss}] {message}");
         }
 
-        public void Dispose() => Stop();
+        public void Dispose()
+        {
+            Stop();
+            _temperatureMonitor.Dispose();
+        }
 
         #endregion
     }
