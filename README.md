@@ -6,6 +6,12 @@ PanelManager 是一个基于 .NET MAUI + BlazorWebView 的桌面副屏控制面�
 
 当前项目主要是上位机部分实现，硬件部分请移步至 [立创开源广场](https://oshwhub.com/5473675a/project_rnkdtbtx)。
 
+## 在线演示
+
+**[打开上位机界面 Demo](https://git8129.github.io/PanelManager/)**
+
+演示直接复用上位机前端，无需安装程序或连接下位机。界面固定为 **1920×1080（16:9）**，在浏览器中等比缩小并水平、垂直居中；大屏保留原始尺寸。天气、网络、媒体和性能使用示例数据，可浏览页面、设置和本地工具。
+
 ## 最新开发进展
 
 - 稳定性更新已覆盖 PanelLink 复合 USB PID `5F55` 识别、WiFi/蓝牙开关防重复触发与传输错误处理、显示缩放持久化，以及串口认证、worker/WebSocket 恢复等链路。

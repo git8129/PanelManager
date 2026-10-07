@@ -12,6 +12,16 @@ This repository primarily contains the host application. See the
 [OSHWHub project](https://oshwhub.com/5473675a/project_rnkdtbtx) for the
 hardware implementation.
 
+## Online Demo
+
+**[Open the PanelManager UI demo](https://git8129.github.io/PanelManager/)**
+
+The static demo reuses the desktop frontend without installation or a connected
+device. Its **1920×1080 (16:9)** canvas scales down to fit the browser and stays
+centered horizontally and vertically; larger screens keep the original size.
+Weather, networks, media, and performance use sample data. Browse pages,
+settings, and local tools.
+
 ## Latest Development Update
 
 - Stability work covers composite PanelLink USB PID `5F55` detection, duplicate-event and transport-error handling for Wi-Fi/Bluetooth toggles, persistent display scaling, and serial authentication plus worker/WebSocket recovery paths.
