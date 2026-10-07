@@ -1227,7 +1227,7 @@
                                     <div class="settings-row">
                                         <div class="settings-row-label">
                                             <span class="icon-md">🔊</span>
-                                            <span>播放来源（耳机 / 蓝牙）</span>
+                                            <span>音频输入</span>
                                         </div>
                                         <div class="settings-row-control settings-row-control-wide">
                                             <select id="audioSourceSelect" class="select-base control-md">
@@ -1239,14 +1239,49 @@
                                     <div class="settings-row">
                                         <div class="settings-row-label">
                                             <span class="icon-md">🎙️</span>
-                                            <span>录音来源</span>
+                                            <span>录音输入</span>
                                         </div>
                                         <div class="settings-row-control settings-row-control-wide">
                                             <select id="audioMicRouteSelect" class="select-base control-md">
                                                 <option value="onboard">板载麦克风</option>
                                                 <option value="headset">耳机麦克风</option>
                                                 <option value="bluetooth">蓝牙耳机麦克风</option>
+                                                <option value="pcOutput">PC 输出（内录）</option>
                                             </select>
+                                        </div>
+                                    </div>
+                                    <div class="settings-row settings-row-audio-effect">
+                                        <div class="settings-row-label">
+                                            <span class="icon-md">🧹</span>
+                                            <span>音频降噪</span>
+                                        </div>
+                                        <div class="settings-row-control">
+                                            <label class="ios-switch" for="usbEffectDns">
+                                                <input id="usbEffectDns" type="checkbox" onchange="usbEffectsApply()">
+                                                <span class="ios-switch-slider"></span>
+                                            </label>
+                                        </div>
+                                    </div>
+                                    <div class="settings-row settings-row-audio-effect">
+                                        <div class="settings-row-label">
+                                            <span class="icon-md">🔇</span>
+                                            <span>AEC 回声消除</span>
+                                        </div>
+                                        <div class="settings-row-control">
+                                            <label class="ios-switch" for="usbEffectAec">
+                                                <input id="usbEffectAec" type="checkbox" onchange="usbEffectsApply()">
+                                                <span class="ios-switch-slider"></span>
+                                            </label>
+                                        </div>
+                                    </div>
+                                    <div class="settings-row settings-row-audio-effect">
+                                        <div class="settings-row-label">
+                                            <span class="icon-md">🎚️</span>
+                                            <span>麦克风输入增益</span>
+                                        </div>
+                                        <div class="settings-row-control settings-row-control-wide settings-row-range-control">
+                                            <input id="usbEffectGain" class="horizontal-slider-compact" type="range" min="0" max="100" step="1" value="80" onchange="usbEffectsApply()">
+                                            <span id="usbEffectGainValue" class="settings-row-value-text">80%</span>
                                         </div>
                                     </div>
                                     <div id="audioRouteStatus" class="audio-route-status" role="status" aria-live="polite">音频来源状态：等待设备</div>

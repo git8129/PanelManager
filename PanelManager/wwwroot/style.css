@@ -6110,6 +6110,15 @@ body {
 }
 
 /* iOS风格Switch开关 */
+.settings-row-audio-effect[hidden] {
+    display: none;
+}
+
+.settings-row-audio-effect .ios-switch {
+    display: inline-block;
+    vertical-align: middle;
+}
+
 .ios-switch {
     position: relative;
     width: 51px;
@@ -6521,6 +6530,23 @@ button.settings-row-clickable {
 .settings-row-control-wide {
     flex: 1;
     max-width: 240px;
+}
+
+.settings-row-range-control {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.settings-row-range-control .horizontal-slider-compact {
+    flex: 1;
+    min-width: 120px;
+}
+
+.settings-row-value-text {
+    min-width: 42px;
+    color: var(--text-secondary);
+    text-align: right;
 }
 
 .settings-row-value-multiline {

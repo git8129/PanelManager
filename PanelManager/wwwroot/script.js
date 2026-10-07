@@ -262,6 +262,9 @@ function handleEvent(message) {
         case 'audio:eqChanged':
             audioEqReload(true);
             break;
+        case 'audio:usbEffectsChanged':
+            usbEffectsReload(true);
+            break;
         case 'system:status':
             console.log('[System] 状态:', message.data);
             hostDebugMode = !!message.data?.debug;
@@ -1228,6 +1231,10 @@ function initSettingsNav(defaultTargetId = null) {
             stopBluetoothAutoScan();
             stopBluetoothDeviceScan();
             sendMessage('bluetooth', 'setVisibility', { enable: 0 }, () => { });
+        }
+
+        if (targetId === 'settings-audio') {
+            usbEffectsReload(true);
         }
 
         if (targetId === 'settings-display') {
@@ -2202,6 +2209,7 @@ const AUDIO_SOURCE_UAC = 'uac';
 const AUDIO_MIC_ONBOARD = 'onboard';
 const AUDIO_MIC_HEADSET = 'headset';
 const AUDIO_MIC_BLUETOOTH = 'bluetooth';
+const AUDIO_MIC_PC_OUTPUT = 'pcOutput';
 const AUDIO_EQ_DEFAULT_FREQS = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
 const AUDIO_EQ_MIN_FREQ = 20;
 const AUDIO_EQ_MAX_FREQ = 22000;
@@ -2287,6 +2295,85 @@ function audioRouteSetStatus(text, state = '') {
     else delete el.dataset.state;
 }
 
+let usbEffectsState = { dns: false, aec: false, gain: 80, aecSupported: false, busy: false };
+
+function usbEffectsRender() {
+    const dns = document.getElementById('usbEffectDns');
+    const aec = document.getElementById('usbEffectAec');
+    const gain = document.getElementById('usbEffectGain');
+    const gainValue = document.getElementById('usbEffectGainValue');
+    const internalRecording = audioRouteState.micInput === AUDIO_MIC_PC_OUTPUT;
+    for (const control of [dns, aec]) {
+        const row = control?.closest('.settings-row-audio-effect');
+        if (row) row.hidden = internalRecording;
+    }
+    if (dns) dns.checked = !!usbEffectsState.dns;
+    if (aec) {
+        aec.checked = !!usbEffectsState.aec;
+        aec.disabled = !usbEffectsState.aecSupported;
+    }
+    if (gain) gain.value = String(usbEffectsState.gain);
+    if (gainValue) gainValue.textContent = `${usbEffectsState.gain}%`;
+}
+
+async function usbEffectsReload(silent = false) {
+    if (!serialConnected) {
+        return false;
+    }
+    try {
+        const response = await sendAudioCommandWithTimeout('getUsbEffects', null, 8000);
+        const data = response?.data || {};
+        usbEffectsState = {
+            dns: !!data.dns,
+            aec: !!data.aec,
+            gain: Math.max(0, Math.min(100, Number(data.gain ?? 80))),
+            aecSupported: data.aecSupported === true,
+            busy: false
+        };
+        usbEffectsRender();
+        return true;
+    } catch (error) {
+        if (!silent) showToast('读取 USB 麦克风处理失败', 2500);
+        return false;
+    }
+}
+
+async function usbEffectsApply() {
+    if (usbEffectsState.busy) return;
+    if (!serialConnected) {
+        showToast('请先连接设备，再调整麦克风设置', 2500);
+        return;
+    }
+    usbEffectsState.busy = true;
+    usbEffectsState.dns = !!document.getElementById('usbEffectDns')?.checked;
+    usbEffectsState.aec = !!document.getElementById('usbEffectAec')?.checked;
+    usbEffectsState.gain = Math.max(0, Math.min(100,
+        Number(document.getElementById('usbEffectGain')?.value ?? 80)));
+    usbEffectsRender();
+    try {
+        const response = await sendAudioCommandWithTimeout('setUsbEffects', {
+            dns: usbEffectsState.dns,
+            aec: usbEffectsState.aec,
+            gain: usbEffectsState.gain,
+            persist: true
+        }, 12000);
+        const data = response?.data || {};
+        usbEffectsState.dns = !!data.dns;
+        usbEffectsState.aec = !!data.aec;
+        usbEffectsState.gain = Number(data.gain ?? usbEffectsState.gain);
+        // 固件可在录音未打开时仅保存配置，成功回包不证明实时音频效果。
+        showToast('麦克风设置已保存', 2500);
+    } catch (error) {
+        showToast('应用 USB 麦克风处理失败', 3000);
+    } finally {
+        usbEffectsState.busy = false;
+        usbEffectsRender();
+    }
+}
+
+window.usbEffectsReload = usbEffectsReload;
+window.usbEffectsApply = usbEffectsApply;
+
 let audioEqState = {
     loaded: false,
     dirty: false,
@@ -2301,7 +2388,8 @@ function audioSourceNormalize(value, fallback = AUDIO_SOURCE_HDMI) {
 }
 
 function audioMicNormalize(value, fallback = AUDIO_MIC_ONBOARD) {
-    return value === AUDIO_MIC_HEADSET || value === AUDIO_MIC_BLUETOOTH ? value : fallback;
+    return value === AUDIO_MIC_HEADSET || value === AUDIO_MIC_BLUETOOTH ||
+        value === AUDIO_MIC_PC_OUTPUT ? value : fallback;
 }
 
 function audioRouteRenderSettings() {
@@ -2309,6 +2397,7 @@ function audioRouteRenderSettings() {
     const micSelect = document.getElementById('audioMicRouteSelect');
     if (sourceSelect) sourceSelect.value = audioRouteState.audioSource;
     if (micSelect) micSelect.value = audioRouteState.micInput;
+    usbEffectsRender();
 }
 
 function audioRouteDeviceReady() {
