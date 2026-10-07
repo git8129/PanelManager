@@ -5574,36 +5574,26 @@ window.touchCal2OpenPreview = touchCal2OpenPreview;
 window.touchCal2Save = touchCal2Save;
 window.openTouchCalibration = () => openPage('touch-calibration');
 
-const TOUCH_DEBUG_COLORS = ['#0a84ff', '#30d158', '#ff9f0a', '#ff453a', '#bf5af2', '#64d2ff'];
+const TOUCH_DEBUG_COLORS = ['#0a84ff', '#30d158', '#ff9f0a', '#ff453a', '#bf5af2', '#64d2ff', '#ff375f', '#ffd60a', '#5e5ce6', '#40c8a0'];
 const touchDebugPointers = new Map();
 let touchDebugBound = false;
 
 function touchDebugColor(pointerId) {
-    return TOUCH_DEBUG_COLORS[Math.abs(pointerId) % TOUCH_DEBUG_COLORS.length];
+    const existing = touchDebugPointers.get(pointerId);
+    if (existing) return existing.color;
+    const used = new Set([...touchDebugPointers.values()].map(point => point.color));
+    return TOUCH_DEBUG_COLORS.find(color => !used.has(color)) || `hsl(${pointerId * 137.5 % 360} 80% 65%)`;
 }
 
 function touchDebugClear() {
     touchDebugPointers.clear();
-    document.getElementById('touchDebugBoard')?.querySelectorAll('.touch-debug-dot').forEach((dot) => dot.remove());
-    touchDebugRenderHud();
+    document.getElementById('touchDebugBoard')?.querySelectorAll('.touch-debug-dot, .touch-debug-label').forEach((node) => node.remove());
+    touchDebugRenderState();
 }
 
-function touchDebugRenderHud() {
+function touchDebugRenderState() {
     const empty = document.getElementById('touchDebugEmpty');
-    const count = document.getElementById('touchDebugCount');
-    const list = document.getElementById('touchDebugList');
-    const total = touchDebugPointers.size;
-    if (empty) empty.hidden = total > 0;
-    if (count) count.textContent = `${total} 点`;
-    if (!list) return;
-    list.replaceChildren();
-    touchDebugPointers.forEach((point, id) => {
-        const item = document.createElement('div');
-        item.className = 'touch-debug-item';
-        item.style.borderColor = point.color;
-        item.textContent = `#${id}  ${Math.round(point.x)}, ${Math.round(point.y)}`;
-        list.appendChild(item);
-    });
+    if (empty) empty.hidden = touchDebugPointers.size > 0;
 }
 
 function touchDebugUpsert(event) {
@@ -5617,8 +5607,15 @@ function touchDebugUpsert(event) {
     if (!point) {
         const dot = document.createElement('div');
         dot.className = 'touch-debug-dot';
-        board.appendChild(dot);
-        point = { x, y, color, dot };
+        const label = document.createElement('div');
+        label.className = 'touch-debug-label';
+        const number = document.createElement('strong');
+        number.textContent = `触点 ${event.pointerId}`;
+        const coordinates = document.createElement('span');
+        coordinates.className = 'touch-debug-coordinates';
+        label.append(number, coordinates);
+        board.append(dot, label);
+        point = { x, y, color, dot, label, coordinates };
         touchDebugPointers.set(event.pointerId, point);
     }
     point.x = x;
@@ -5626,16 +5623,28 @@ function touchDebugUpsert(event) {
     point.dot.style.left = `${x}px`;
     point.dot.style.top = `${y}px`;
     point.dot.style.borderColor = color;
-    point.dot.textContent = String(event.pointerId);
-    touchDebugRenderHud();
+    point.coordinates.textContent = `X ${Math.round(x)} · Y ${Math.round(y)}`;
+    const radius = point.dot.offsetWidth / 2;
+    const width = point.label.offsetWidth, height = point.label.offsetHeight;
+    let left = x + radius + 12, top = y - height / 2;
+    if (left + width > board.clientWidth - 8) left = x - radius - width - 12;
+    if (left < 8) {
+        left = x - width / 2;
+        top = y + radius + 12;
+        if (top + height > board.clientHeight - 8) top = y - radius - height - 12;
+    }
+    point.label.style.left = `${Math.max(8, Math.min(left, board.clientWidth - width - 8))}px`;
+    point.label.style.top = `${Math.max(8, Math.min(top, board.clientHeight - height - 8))}px`;
+    touchDebugRenderState();
 }
 
 function touchDebugRemove(event) {
     const point = touchDebugPointers.get(event.pointerId);
     if (!point) return;
     point.dot.remove();
+    point.label.remove();
     touchDebugPointers.delete(event.pointerId);
-    touchDebugRenderHud();
+    touchDebugRenderState();
 }
 
 function touchDebugOnPointerDown(event) {

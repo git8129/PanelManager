@@ -2732,32 +2732,31 @@ body {
 }
 
 #page-touch-debug {
-    background:
-        radial-gradient(circle at 14% 16%, rgba(10, 132, 255, 0.18), transparent 34%),
-        radial-gradient(circle at 86% 74%, rgba(48, 209, 88, 0.12), transparent 30%),
-        rgba(0, 0, 0, 0.72);
+    padding-bottom: 0;
 }
 
-.touch-debug-page {
+#page-touch-debug .page-header {
+    padding: var(--ui-space-2) var(--ui-space-3);
+    gap: var(--ui-space-3);
+}
+
+.touch-debug-page.page-content {
     flex: 1;
     min-height: 0;
-    display: grid;
-    grid-template-rows: 1fr auto;
-    gap: 20px;
-    padding: 20px 24px 0;
+    display: flex;
+    padding: var(--ui-space-2);
+    overflow: hidden;
 }
 
 .touch-debug-board {
     position: relative;
+    flex: 1;
     min-height: 0;
     overflow: hidden;
     touch-action: none;
-    border-radius: 28px;
-    background:
-        linear-gradient(rgba(255, 255, 255, 0.045) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(255, 255, 255, 0.045) 1px, transparent 1px),
-        rgba(4, 8, 16, 0.86);
-    background-size: 64px 64px, 64px 64px, auto;
+    border-radius: var(--ui-radius-lg);
+    border: 1px solid var(--ui-color-border);
+    background: var(--ui-color-surface-muted);
 }
 
 .touch-debug-empty {
@@ -2771,63 +2770,62 @@ body {
     color: var(--text-secondary);
     text-align: center;
     pointer-events: none;
+    padding: var(--ui-space-6);
+}
+
+.touch-debug-empty[hidden] {
+    display: none;
 }
 
 .touch-debug-empty-title {
-    font-size: var(--font-heading-1);
+    font-size: var(--ui-font-title);
     color: var(--text-primary);
-    font-weight: 800;
+    font-weight: 500;
 }
 
 .touch-debug-empty-desc {
-    font-size: var(--font-body-lg);
+    font-size: var(--ui-font-body);
 }
 
 .touch-debug-dot {
     position: absolute;
-    width: 88px;
-    height: 88px;
-    margin: -44px 0 0 -44px;
+    width: 112px;
+    height: 112px;
+    margin: -56px 0 0 -56px;
     border-radius: 50%;
     pointer-events: none;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: #fff;
-    font-weight: 800;
-    border: 4px solid var(--accent-blue);
-    background: rgba(10, 132, 255, 0.22);
-    box-shadow: 0 0 0 10px rgba(10, 132, 255, 0.12);
+    border: 6px solid var(--accent-blue);
 }
 
-.touch-debug-hud {
+.touch-debug-dot::before {
+    content: '';
+    position: absolute;
+    inset: 8px;
+    border-radius: 50%;
+    border: 3px solid rgba(255, 255, 255, 0.55);
+    background: rgba(255, 255, 255, 0.18);
+}
+
+.touch-debug-label {
+    position: absolute;
     display: flex;
     flex-direction: column;
-    gap: 12px;
-    padding: 16px 20px;
-    border-radius: 28px;
+    width: max-content;
+    max-width: calc(100% - 16px);
+    padding: var(--ui-space-2) var(--ui-space-3);
+    border-radius: var(--ui-radius-sm);
+    font-family: var(--ui-font-sans);
+    font-size: var(--ui-font-body);
+    font-variant-numeric: tabular-nums;
+    line-height: 1.4;
+    color: var(--ui-color-text);
+    background: rgba(0, 0, 0, 0.7);
+    pointer-events: none;
+    z-index: 1;
 }
 
-.touch-debug-count {
-    font-size: var(--font-body-lg);
-    font-weight: 800;
-    color: var(--accent-blue);
-}
-
-.touch-debug-list {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 10px;
-}
-
-.touch-debug-item {
-    min-height: 48px;
-    padding: 8px 16px;
-    border-radius: 999px;
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    background: rgba(255, 255, 255, 0.06);
-    font-family: var(--font-family-mono, Consolas, monospace);
-    color: var(--text-primary);
+.touch-debug-coordinates {
+    font-size: var(--ui-font-body-lg);
 }
 
 /* ========== AI 页面 v2（先清理旧样式，再重建） ========== */
