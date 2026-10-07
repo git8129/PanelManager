@@ -1165,7 +1165,7 @@ function initPagination() {
         if (Math.abs(diff) > 100) {
             if (diff > 0 && currentPage > 0) {
                 goToPage(currentPage - 1);
-            } else if (diff < 0 && currentPage < 1) {
+            } else if (diff < 0 && currentPage < 2) {
                 goToPage(currentPage + 1);
             } else {
                 goToPage(currentPage);
@@ -9219,6 +9219,7 @@ function initBluetoothStatus() {
             const bluetoothModeRow = document.getElementById('bluetoothModeRow');
             const bluetoothModeSelect = document.getElementById('bluetoothModeSelect');
             const bluetoothLocalNameRow = document.getElementById('bluetoothLocalNameRow');
+            if (bluetoothModeSelect) bluetoothModeSelect.disabled = mode === 0;
             bluetoothStatus.scanning = !!response.data.scanning;
             isScanning = bluetoothStatus.scanning;
             if (mode !== 0) {
@@ -9253,8 +9254,9 @@ function initBluetoothStatus() {
                 bluetoothStatus.enabled = false;
                 bluetoothSwitchInput.checked = false;
                 bluetoothDevicesContainer.style.display = 'none';
-                if (bluetoothModeRow) bluetoothModeRow.style.display = 'none';
-                if (bluetoothLocalNameRow) bluetoothLocalNameRow.style.display = 'none';
+                if (bluetoothModeRow) bluetoothModeRow.style.display = 'flex';
+                if (bluetoothLocalNameRow) bluetoothLocalNameRow.style.display = 'flex';
+                updateBluetoothLocalName();
             }
             audioRouteRenderSettings();
             console.log('[Bluetooth] 状态初始化完成 - Mode:', mode, bluetoothStatus);
@@ -9265,8 +9267,8 @@ function initBluetoothStatus() {
 function updateBluetoothLocalName() {
     const el = document.getElementById('bluetoothLocalName');
     if (!el) return;
-    const name = (bluetoothStatus && bluetoothStatus.localName) ? String(bluetoothStatus.localName).trim() : '';
-    el.textContent = name || '--';
+    const name = bluetoothStatus.enabled && bluetoothStatus.localName ? String(bluetoothStatus.localName).trim() : '';
+    el.textContent = name || '-----';
 }
 
 window.renameLocalBluetoothDevice = () => {
@@ -9363,9 +9365,11 @@ function handleBluetoothSwitchChange(isOn) {
                 const btStatusEl = document.getElementById('btStatus');
                 if (btStatusEl) btStatusEl.textContent = '未连接';
                 updateCurrentBluetoothDevice();
-                if (bluetoothLocalNameRow) bluetoothLocalNameRow.style.display = 'none';
+                if (bluetoothLocalNameRow) bluetoothLocalNameRow.style.display = 'flex';
                 bluetoothDevicesContainer.style.display = 'none';
-                if (bluetoothModeRow) bluetoothModeRow.style.display = 'none';
+                if (bluetoothModeRow) bluetoothModeRow.style.display = 'flex';
+                if (bluetoothModeSelect) bluetoothModeSelect.disabled = true;
+                updateBluetoothLocalName();
                 // 停止自动扫描
                 stopBluetoothAutoScan();
                 // 清空设备列表
@@ -9413,6 +9417,8 @@ function enableBluetoothUI() {
     const bluetoothDevicesContainer = document.getElementById('bluetoothDevicesContainer');
     const bluetoothModeRow = document.getElementById('bluetoothModeRow');
     const bluetoothLocalNameRow = document.getElementById('bluetoothLocalNameRow');
+    const bluetoothModeSelect = document.getElementById('bluetoothModeSelect');
+    if (bluetoothModeSelect) bluetoothModeSelect.disabled = false;
     bluetoothDevicesContainer.style.display = 'block';
     if (bluetoothModeRow) bluetoothModeRow.style.display = 'flex';
     if (bluetoothLocalNameRow) bluetoothLocalNameRow.style.display = 'flex';

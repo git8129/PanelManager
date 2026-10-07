@@ -1176,13 +1176,13 @@
                                             </div>
                                         </div>
                                     </div>
-                                    <div class="settings-row" id="bluetoothModeRow" style="display: none;">
+                                    <div class="settings-row" id="bluetoothModeRow">
                                         <div class="settings-row-label">
                                             <span>🧭</span>
                                             <span>模式</span>
                                         </div>
                                         <div class="settings-row-control" style="flex: 1; max-width: 240px;">
-                                            <select id="bluetoothModeSelect" class="select-base control-md">
+                                            <select id="bluetoothModeSelect" class="select-base control-md" disabled>
                                                 <option value="2">发射（连耳机）</option>
                                                 <option value="1">接收（连手机）</option>
                                             </select>
@@ -1198,7 +1198,7 @@
                                         </div>
                                     </div>
 
-                                    <div class="settings-row" id="bluetoothLocalNameRow" style="display: none;">
+                                    <div class="settings-row" id="bluetoothLocalNameRow">
                                         <div class="settings-row-label">
                                             <span>🪪</span>
                                             <span>本机名称</span>
@@ -1206,7 +1206,7 @@
                                         <div class="settings-row-value"
                                             style="display:flex; align-items:center; gap:10px;">
                                             <span id="bluetoothLocalName" class="text-ellipsis"
-                                                style="max-width: 160px;">--</span>
+                                                style="max-width: 160px;">-----</span>
                                             <button class="btn-base btn-compact btn-tonal" type="button"
                                                 onclick="renameLocalBluetoothDevice()">改名</button>
                                         </div>

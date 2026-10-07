@@ -359,6 +359,33 @@
 }
 
 /* Forms */
+select.select-base,
+select.ui-select {
+    color-scheme: dark;
+}
+
+select.select-base option,
+select.select-base optgroup,
+select.ui-select option,
+select.ui-select optgroup {
+    background: var(--bg-secondary, #1c1c1e);
+    color: var(--ui-color-text);
+    font-family: var(--ui-font-sans);
+    font-size: var(--ui-font-body);
+}
+
+select.select-base option:checked,
+select.ui-select option:checked {
+    background: color-mix(in srgb, var(--ui-color-primary) 70%, var(--ui-color-bg));
+    color: var(--ui-color-text);
+}
+
+select.select-base option:disabled,
+select.ui-select option:disabled {
+    background: var(--bg-secondary, #1c1c1e);
+    color: var(--ui-color-text-muted);
+}
+
 .ui-field {
     display: flex;
     flex-direction: column;
